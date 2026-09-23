@@ -1,0 +1,35 @@
+graph TD
+    S["Generated sentence<br/>with cited source ids"] --> N{"Contains numbers?"}
+    N -->|"yes"| NG{"Every number appears<br/>normalised in cited text?"}
+    NG -->|"no"| FAIL["Marked UNSUPPORTED<br/>semantic scoring never attempted"]
+    NG -->|"yes"| SEM
+    N -->|"no"| SEM
+
+    SEM["Cross-encoder support score<br/>sentence vs each cited source"] --> TH{"Score vs 0.50"}
+    TH -->|"below"| WEAK["Downgraded to WEAK"]
+    TH -->|"above"| SUP["SUPPORTED"]
+
+    SUP --> CFL{"Cross-document<br/>numeric disagreement<br/>on same-shaped claim?"}
+    WEAK --> CFL
+    CFL -->|"yes"| CONF2["Conflict flagged<br/>confidence x 0.85"]
+    CFL -->|"no"| CLEAN2["No conflict"]
+
+    CONF2 --> SC["supported_fraction<br/>feeds confidence"]
+    CLEAN2 --> SC
+    FAIL --> SC
+
+    subgraph DEF["Defences applied before generation"]
+        D1["Nonce-fenced source blocks<br/>random per request"]
+        D2["source tags stripped from<br/>uploaded text"]
+        D3["Explicit instruction-ignoring clause:<br/>uploaded text is data, not commands"]
+        D4["NO_ANSWER is the only permitted<br/>response when unsupported"]
+    end
+
+    DEF -.->|"prompt construction"| S
+
+    classDef bad fill:#fde8e8,stroke:#c53030,color:#1a1a2e
+    classDef mid fill:#fff4e5,stroke:#b8860b,color:#1a1a2e
+    classDef good fill:#e6f4ea,stroke:#2f7a4d,color:#1a1a2e
+    class FAIL bad
+    class WEAK,CONF2 mid
+    class SUP good

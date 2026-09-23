@@ -1,0 +1,16 @@
+graph LR
+    U["Upload<br/>PDF / TXT<br/>max 20 MB, 200 pages"] --> PF{"PDF preflight<br/>pypdf text layer?"}
+    PF -->|"text present"| FAST["Fast path<br/>pypdf extraction"]
+    PF -->|"scanned / complex"| SLOW["Docling layout path<br/>tables linearised<br/>figures captioned by BLIP"]
+    FAST --> CLEAN
+    SLOW --> CLEAN
+    CLEAN["Normalise<br/>NFKC, de-hyphenate,<br/>strip running headers/footers"] --> EL["Element list<br/>kind, page, section_path"]
+    EL --> PC["Parent chunks ~800 tok<br/>section-aware grouping"]
+    PC --> CC["Child chunks ~200 tok<br/>sentence windows, 1-sentence overlap<br/>atomic for tables/figures"]
+    CC --> EMB["Embed child.embed_text<br/>bge-base, normalised"]
+    EMB --> CH["ChromaDB chunks collection<br/>persisted, cosine"]
+    CC --> BM["BM25 index<br/>header + text tokens"]
+    PC --> PJ["data/parents/doc_id.json<br/>full parent text + char spans"]
+    PJ --> MF["Manifest<br/>doc_id = content hash<br/>+ ingest_version"]
+
+    MF -.->|"same hash: short-circuit<br/>same filename: replace"| U

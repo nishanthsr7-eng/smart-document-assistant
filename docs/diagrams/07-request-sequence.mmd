@@ -1,0 +1,42 @@
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant FE as React SPA
+    participant API as FastAPI
+    participant AN as answerer.py
+    participant RET as Retrieval - local
+    participant LLM as LLM provider
+    participant TR as Trust layer
+
+    U->>FE: Ask question
+    FE->>API: POST /query
+    API->>AN: answer_question
+
+    par Speculative retrieval
+        AN->>RET: dense on raw question + BM25
+        RET-->>AN: 60 candidates
+    and Query rewriting
+        AN->>LLM: condense + expand
+        LLM-->>AN: standalone question + 3 variants
+    end
+
+    AN->>RET: dense on variants, RRF fuse, rerank top 10
+    RET-->>AN: ranked hits + top_score
+    AN->>AN: abstention gate
+
+    alt top_score below 0.30 without consensus
+        AN-->>FE: abstained + near-miss + suggestions
+    else passes gate
+        AN->>AN: assemble 4 sources, 3000 tok
+        AN->>LLM: grounded prompt, stream
+        loop per token
+            LLM-->>AN: token
+            AN-->>FE: SSE token
+            FE-->>U: text appears
+        end
+        AN->>TR: validate completed sentences - concurrent
+        TR-->>AN: support + conflicts
+        AN->>TR: compute confidence
+        TR-->>AN: label + components
+        AN-->>FE: sources, citation markers, confidence, trace
+    end

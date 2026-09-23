@@ -1,0 +1,39 @@
+graph TD
+    Q["Question + selected doc_ids"] --> CA{"Answer cache hit?<br/>TTL 1h, no history"}
+    CA -->|"yes"| OUT1["Return cached answer"]
+    CA -->|"no"| SPEC
+
+    subgraph SPEC["Stage 1: Search - concurrent"]
+        direction LR
+        RAW["Dense search on RAW question<br/>starts immediately, k=30"]
+        LEX["BM25 lexical search<br/>k=30"]
+        LLMQ["LLM condense + expand<br/>3 variants, runs in parallel"]
+        LLMQ --> EXTRA["Dense search on variants"]
+    end
+
+    SPEC --> MERGE["merge_dense<br/>best cosine per chunk"]
+    MERGE --> RRF["Reciprocal Rank Fusion<br/>dense + lexical, k=60"]
+    RRF --> RANK["Cross-encoder rerank<br/>top 10 fused candidates"]
+    RANK --> GATE{"Abstention gate<br/>top_score vs 0.30"}
+
+    GATE -->|"below 0.30<br/>and no dense/lexical consensus"| ABS["ABSTAIN<br/>+ near-miss passage<br/>+ did-you-mean suggestions"]
+    GATE -->|"0.30 to 0.45"| SOFT["Answer with<br/>confidence modifier < 1.0"]
+    GATE -->|"above 0.45"| PASS["Answer at full confidence"]
+
+    SOFT --> ASM
+    PASS --> ASM
+    ASM["Stage 2: Assemble context<br/>child hit to parent lookup<br/>MMR diversity, max 2 per doc<br/>span-centred window<br/>4 sources, 3000 tok budget"]
+
+    ASM --> LLM["Stage 3: Generate<br/>closed-book prompt<br/>nonce-fenced sources<br/>inline [n] citations required<br/>streamed"]
+    LLM --> NA{"Model returned<br/>NO_ANSWER?"}
+    NA -->|"yes"| ABS
+    NA -->|"no"| VAL
+
+    VAL["Stage 4: Validate - concurrent with stream<br/>per completed sentence"]
+    VAL --> CONF["Stage 5: Confidence<br/>4 weighted signals"]
+    CONF --> OUT2["Answer card<br/>text + [n] citations<br/>+ High/Medium/Low<br/>+ full trace"]
+
+    classDef abstain fill:#fde8e8,stroke:#c53030,color:#1a1a2e
+    classDef ok fill:#e6f4ea,stroke:#2f7a4d,color:#1a1a2e
+    class ABS abstain
+    class OUT2,PASS ok
