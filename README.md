@@ -1,0 +1,307 @@
+# Smart Document Assistant
+
+A RAG (Retrieval-Augmented Generation) application for uploading PDF and TXT documents, asking questions, and getting cited answers with calibrated confidence scores. Embeddings, vector store, and reranking run locally; generation defaults to a free-tier cloud API (see **Provider Choice** below), with a fully-offline Ollama fallback.
+
+## Problem Understanding
+
+The task is to build a document Q&A system that:
+1. Accepts uploaded documents (PDF, TXT)
+2. Extracts and indexes their content for retrieval
+3. Answers user questions grounded in the uploaded documents
+4. Provides source citations so the user can verify claims
+5. Refuses to answer when the documents don't contain the needed information, rather than hallucinating
+
+The core challenge is **grounding**: every claim in the answer must trace back to a specific passage, and the system must know when it doesn't know.
+
+## Architecture
+
+```
+User
+  |
+  v
++---------------------------+
+|  React UI (frontend/)     |  Upload / Ask / View answers
+|  Vite SPA, React hooks    |
+|  index.css, components/   |
++---------------------------+
+  |                |
+  v                v
++---------------------------+
+|  FastAPI (src/api/)       |  REST endpoints
+|  router.py, schemas.py    |
++---------------------------+
+  |                |
+  v                v
++------------+  +---------------------+
+| Ingestion  |  | Answer pipeline     |
+| pipeline   |  | (orchestrated by    |
+| (src/      |  |  answerer.py)       |
+| ingestion/)|  +---------------------+
+  |                |         |        |
+  v                v         v        v
++--------+  +---------+ +--------+ +--------+
+| Parsers|  | Hybrid  | | Trust  | | LLM    |
+| docling|  | search  | | layer  | | Gemini/|
+| pypdf  |  | dense + | | abstain| | Groq/  |
+| BLIP*  |  | BM25 +  | | cite   | | Ollama |
++--------+  | rerank  | | confid.| +--------+
+  |         +---------+ +--------+
+  v              |
++--------+  +---------+
+| Chunker|  | ChromaDB|
+| parent/|  | vectors |
+| child  |  +---------+
++--------+
+```
+
+**Data flow:**
+
+1. **Ingest**: Upload -> parse (docling for complex PDFs, pypdf for simple ones) -> structure-aware chunking (parent/child, 800/200 tokens) -> embed with `bge-base-en-v1.5` -> store in ChromaDB
+2. **Retrieve**: Question -> embed -> hybrid search (dense cosine + BM25 lexical, reciprocal rank fusion) -> optional cross-encoder reranking (default mode) -> top-k context assembly with token budget
+3. **Generate**: Abstention gate (is there enough evidence?) -> prompt with source blocks (injection-hardened) -> LLM answers in plain text with inline `[n]` citation markers -> citation validation -> confidence scoring
+4. **Present**: Answer with inline citations, source cards with highlighted passages, trace viewer showing each stage's timing and data
+
+### Package structure
+
+```
+frontend/                Presentation layer (React SPA)
+  index.html             Entrypoint
+  vite.config.js         Proxy config
+  src/
+    App.jsx              Main layout and state
+    api.js               REST API client
+    hooks/               State management
+    components/          UI components
+
+src/                     Business logic (UI-agnostic, testable)
+  api/                   FastAPI REST layer
+  core/                  Config, errors, tracing
+  ingestion/             Parse -> chunk -> index pipeline
+  retrieval/             Embedder, vector store, BM25, hybrid search, reranker
+  generation/            LLM client, prompt templates, answer orchestration
+  trust/                 Abstention gate, citation validation, confidence scoring
+
+evaluation/              Golden set (33 items) + metrics runner
+data/sample_docs/        Three real public-domain U.S. government documents
+```
+
+## Technology Choices
+
+| Component | Choice | Why |
+|---|---|---|
+| **LLM** | Gemini (`gemini-3.6-flash`) by default; Groq or Ollama `qwen3:8b` as swappable providers | Free-tier cloud inference is far faster than CPU-only local generation; see **Provider Choice** below. Answers are plain text with inline `[n]` citation markers, parsed by `prompts.parse_citations` — not schema-enforced JSON. |
+| **Embeddings** | `BAAI/bge-base-en-v1.5` | Runs locally on CPU, strong retrieval quality for its size, well-tested for semantic search. |
+| **Reranker** | `mxbai-rerank-base-v1` | Cross-encoder precision pass; used as a trust signal for confidence/citation scoring, and for reranking retrieval results in the default mode. |
+| **Vector store** | ChromaDB | Embedded, file-based, zero-config. Adequate for the document scale of this assignment. |
+| **Lexical search** | BM25 (rank-bm25) | Complements dense search for keyword-heavy queries (policy numbers, proper nouns). |
+| **PDF parsing** | docling + pypdf | docling handles complex layouts (tables, figures, sections); pypdf is a fast path for simple text PDFs, saving 3-10s per file. |
+| **Figure captioning** | BLIP (`blip-image-captioning-base`) | `parsers.FigureCaptioner` runs behind the same lazy-singleton pattern as the embedder; the `/ingest` route constructs one and every extracted figure gets indexed as `[Figure, p.N: <caption>]` instead of a bare placeholder. |
+| **UI** | React + Vite | Fast, modern SPA with custom CSS modules. Replaces the older Streamlit prototype. |
+| **Chunking** | Parent/child (800/200 tokens) | Children are sized to the embedder's token window; parents provide full context to the LLM. Structure-aware splitting preserves section boundaries. |
+
+**Trade-offs:**
+- **Cloud LLM vs. fully local**: Faster generation and no CPU inference cost, at the price of needing a free-tier API key and network access. See **Provider Choice**.
+- **Hybrid search vs. dense-only**: Adds ~2ms but catches keyword queries that dense search misses (e.g., specific section numbers).
+- **Cross-encoder reranking**: The default mode (`hybrid_rerank`). Adds latency on CPU; `hybrid` (no rerank) and `dense` are available for faster, lower-precision answers.
+
+## Provider Choice
+
+Generation is pluggable via `LLM_PROVIDER` (`src/generation/client.py`): `gemini` (default), `groq`, or `ollama`.
+
+The default is a cloud API, not fully-offline local inference, because CPU-only generation with a model capable enough to follow citation instructions reliably is slow (multi-second per answer) on typical grading hardware. Gemini and Groq both have generous free tiers that need only a key pasted into `.env` — no payment method, no account beyond the API signup. `ollama` remains available as a genuinely offline fallback (`qwen3:8b`) for anyone who'd rather not use a cloud key at all; set `LLM_PROVIDER=ollama` and follow the Ollama setup steps below.
+
+## How to Run
+
+### Prerequisites
+- Python 3.10+
+- A free API key from [Google AI Studio](https://aistudio.google.com/apikey) (default provider) — or [Ollama](https://ollama.com) installed if you'd rather run fully offline
+
+### Setup
+
+```bash
+# 1. Create and activate a virtual environment
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # Linux/Mac
+
+# 2. Install CPU-only PyTorch (avoids pulling a ~2GB CUDA build)
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Copy the environment file and add your key
+copy .env.example .env        # Windows
+# cp .env.example .env        # Linux/Mac
+# edit .env and set GEMINI_API_KEY (or switch LLM_PROVIDER=ollama, see Provider Choice)
+
+# 5. Run the FastAPI backend
+uvicorn src.api.router:app --host 127.0.0.1 --port 8000
+
+# 6. In a second terminal, start the React frontend
+cd frontend
+npm install
+npm run dev
+```
+
+If using `LLM_PROVIDER=ollama` instead, pull the model and start a project-scoped server before step 5:
+
+```bash
+set OLLAMA_HOST=127.0.0.1:11435
+set OLLAMA_MODELS=data\models\ollama
+ollama pull qwen3:8b
+ollama serve
+# (keep this terminal open)
+```
+
+The app opens at `http://localhost:5173`. Upload a PDF or TXT file, wait for indexing, then ask a question.
+
+### Environment Variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LLM_PROVIDER` | `gemini` | Generation backend: `gemini`, `groq`, or `ollama` |
+| `GEMINI_API_KEY` | _(empty)_ | Required when `LLM_PROVIDER=gemini` |
+| `GEMINI_MODEL` | `gemini-3.6-flash` | Gemini model name |
+| `GROQ_API_KEY` | _(empty)_ | Required when `LLM_PROVIDER=groq` |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model name |
+| `OLLAMA_HOST` | `127.0.0.1:11435` | Ollama server address, used when `LLM_PROVIDER=ollama` |
+| `OLLAMA_MODEL` | `qwen3:8b` | Ollama model name |
+| `HF_TOKEN` | _(empty)_ | Optional; only needed for gated HF models or to avoid anonymous rate limits on embedder/reranker downloads |
+
+### Running Tests
+
+```bash
+pytest tests/ -v
+```
+
+### Running Evaluation
+
+```bash
+python -m evaluation.run_eval --mode hybrid --generate
+```
+
+## Hallucination Handling
+
+The system uses a multi-layer defense against hallucination:
+
+### 1. Abstention Gate (pre-generation)
+Before calling the LLM, the system checks whether retrieved passages are relevant enough to answer the question. If the best retrieval score is below the calibrated threshold (0.3, swept against the golden set), it refuses to answer rather than generating from weak evidence. A retrieval-consensus override prevents false refusals when both dense and lexical search independently rank the same chunk highly.
+
+### 2. Source-Constrained Prompting
+The LLM is prompted to answer only from the numbered source blocks and to cite each sentence with inline `[n]` markers tied to source IDs, which `prompts.parse_citations` extracts from the plain-text response. The prompt explicitly instructs the model to say it cannot answer if no source covers the question.
+
+### 3. Citation Validation (post-generation)
+After generation, each sentence's cited sources are validated using the cross-encoder reranker. If a citation doesn't match its claimed source passage above a support threshold, it's flagged as "unverified" in the UI. Sentences with no valid citations are marked "unsupported."
+
+### 4. Confidence Scoring
+A calibrated confidence score combines retrieval quality and citation validity. The score and label (High/Medium/Low) are shown to the user, so they can judge how much to trust the answer.
+
+### 5. Conflict Detection
+When different sources provide conflicting information (e.g., different numeric values for the same claim), the system surfaces the conflict explicitly rather than silently picking one.
+
+### 6. Prompt Injection Defense
+Uploaded documents are untrusted input. Source blocks in the prompt are wrapped in random-nonce XML tags, and any tag-like text inside the document is stripped, preventing a malicious document from forging citation boundaries or injecting instructions.
+
+## Additional Features
+
+Beyond the minimum requirements, the assistant implements:
+
+### Conversation Memory / Follow-Up Questions
+The chat retains history per document session (`frontend/src/hooks/useChat.js`). A follow-up like "what about the second one?" is resolved into a standalone question before retrieval, using conversation history (`CONDENSE_SYSTEM`/`CONDENSE_EXPAND_SYSTEM` in `src/generation/prompts.py`). After each answer, the system also proposes three follow-up questions drawn from retrieved-but-unused passages (`FOLLOWUP_SYSTEM`), so the user can keep exploring the document without guessing what else is in it.
+
+### Answer Confidence / Evidence Indicator
+Every answer carries a calibrated confidence score and High/Medium/Low label (`src/trust/confidence.py`), combining retrieval quality with per-sentence citation validation. Sentences whose cited source doesn't actually support them are flagged "unverified" or "unsupported" in the UI (`AnswerCard.jsx`), so the user can see which specific claims to double-check rather than trusting or distrusting the whole answer.
+
+### Multi-Document Reasoning
+Retrieval spans the full corpus, not a single selected file, and the prompt instructs the model to synthesize across sources rather than copy from one. When sources disagree on a value, the system surfaces each conflicting value with its own citation instead of silently picking one (see Hallucination Handling §5).
+
+### Query Suggestions ("Did You Mean")
+When a question can't be answered from the corpus, the system finds the closest-matching passage anyway and proposes a related question that passage *can* answer (`DIDYOUMEAN_SYSTEM`), turning a dead-end "no answer" into a useful next step.
+
+## Edge Cases
+
+| Case | Behavior | Where |
+| --- | --- | --- |
+| Encrypted / scanned / zero-text PDF | Reason-specific error message, upload rejected | `src/ingestion/parsers.py` |
+| Wrong extension / spoofed type / 0-byte / oversize / page cap / non-UTF-8 TXT | Rejected with a specific message; TXT falls back to cp1252 before giving up | `src/ingestion/parsers.py` |
+| Question before upload | Send disabled, hint explains why | `frontend/src/components/Composer.jsx` |
+| Empty / over-length question | Send disabled past 2000 chars, hint shown | `frontend/src/components/Composer.jsx` |
+| Duplicate content (same bytes) | Re-ingest short-circuits to the existing index | `src/ingestion/pipeline.py` |
+| Duplicate filename, new content | Old doc's index, vectors and chip are removed before the new one is added | `src/ingestion/pipeline.py` |
+| LLM provider down / model missing / timeout | Plain-text error, composer re-enabled, no stack trace | `src/generation/client.py` |
+| Double-click Send / upload during an answer | `busy` state blocks re-entrant calls | `frontend/src/hooks/useChat.js` |
+| Browser refresh | Chat history resets, but the on-disk index persists; doc list is reloaded from the ingest manifest on bootstrap | `frontend/src/App.jsx` |
+| Prompt injection in uploaded document | Source blocks wrapped in per-request random-nonce tags; tag-shaped text inside documents is stripped | `src/generation/prompts.py` |
+| Huge table chunk retrieved | Source truncated to remaining context budget, centered on the matched span | `src/generation/answerer.py` |
+
+## Evaluation Results
+
+Evaluated on a 33-item golden set covering single-doc factual, multi-doc comparison, unanswerable, and
+prompt-injection queries against three real public-domain U.S. government documents. Generated with
+`LLM_PROVIDER=ollama` (`qwen3:8b`); re-run after the `hybrid` score-scale fix (see
+`docs/improvement-plan.md` step 1). Re-run with `python -m evaluation.run_eval --mode <mode>` (see
+`evaluation/results/*.md`).
+
+**Default mode: `hybrid_rerank`** (dense + BM25 fusion, cross-encoder reranked)
+
+| Metric | `dense` | `hybrid` | `hybrid_rerank` |
+|---|---|---|---|
+| Retrieval hit@k | 1.000 | 1.000 | 1.000 |
+| Retrieval MRR | 0.980 | 0.943 | 0.948 |
+| Context recall | 0.980 | 0.960 | 0.780 |
+| Context precision | 0.450 | 0.420 | 0.710 |
+| Abstention: refusal precision | 1.000 | 1.000 | 0.667 |
+| Abstention: refusal recall | 0.625 | 0.750 | 1.000 |
+| Abstention: false refusal rate | 0.000 | 0.000 | 0.160 |
+| Must-contain accuracy | 0.840 | 0.760 | 0.810 |
+| Citation validity | 0.691 | 0.704 | 0.750 |
+| Numeric grounding | 0.917 | 0.833 | 1.000 |
+| Faithfulness | 0.808 | 0.875 | 0.849 |
+
+Key results for the default mode (`hybrid_rerank`):
+- **100% retrieval hit rate**: every answerable question's target passage is in the top-k.
+- **100% refusal recall**: every unanswerable question is correctly refused (no hallucinated answers), at
+  the cost of a 16% false-refusal rate — the conservative abstention threshold trades recall for
+  over-caution on borderline answerable questions.
+- **75% citation validity, 84% faithfulness**: most cited claims check out against their source passage,
+  but this is via a local `qwen3:8b` generation, not the default cloud provider; Gemini/Groq numbers
+  will likely differ and haven't been benchmarked here.
+- `hybrid`'s false-refusal rate dropped from a near-universal abstain (pre-fix) to 0.000 — confirms the
+  RRF score normalization fix (step 1) put it on a threshold scale that actually works.
+
+## AI Tools Used
+
+**Claude Code** (Anthropic's CLI) was used as the coding assistant throughout development. Claude wrote code, suggested architectures, debugged issues, and helped iterate on the design. Claude itself is never called by the running application — generation at runtime goes through the configured `LLM_PROVIDER` (Gemini, Groq, or Ollama), not Claude.
+
+Specific uses:
+- Scaffolding the project structure and writing initial implementations
+- Debugging structured output issues with an early qwen3:8b JSON-schema prompt (discovered a schema regression where the model returned empty sentences with a complex schema; the prompt/parsing approach was later changed to plain text with inline `[n]` markers)
+- Writing and running the evaluation harness
+- Iterating on the UI design (CSS, component layout)
+- Code review and security review passes
+
+## Known Limitations
+
+1. **Reranker latency**: The cross-encoder reranker adds meaningful latency, especially on CPU-only hardware.
+2. **PDF-only complex parsing**: Only PDF and TXT are supported. DOCX/XLSX could be added via docling but were out of scope.
+3. **No OCR**: Fully scanned PDFs are rejected. Mixed PDFs (text pages + scanned forms) index the text pages only and caption figures via BLIP, but scanned text itself isn't recovered.
+4. **Single-session memory**: Follow-up questions are resolved against the last few turns via a condense-and-expand prompt, but history lives only in the browser tab and is lost on refresh — nothing is persisted server-side.
+5. **Unvalidated `doc_ids`**: `/query`'s `doc_ids` filter is client-supplied and not checked against the manifest. Harmless for a single-user local app, but not something to carry into a multi-user deployment as-is.
+5. **Abstention calibration**: The abstention threshold (0.3) was swept on a 33-item golden set. A larger, more diverse evaluation set would produce more robust thresholds.
+
+## Time Log
+
+| Phase | Activity | Time |
+|---|---|---|
+| 0 | Problem understanding, plan, environment setup, model downloads | 1 hr |
+| 1 | Ingestion pipeline (parsers, chunker, pipeline) + tests | 1.5 hr |
+| 2 | Generation skeleton (embedder, vector store, LLM client, answerer) | 1 hr |
+| 3 | Evaluation harness + golden set | 0.5 hr |
+| 4 | Retrieval upgrade (BM25, hybrid fusion, reranker) | 1 hr |
+| 5 | Trust layer (abstention, citations, confidence, conflict detection) | 1 hr |
+| 6 | Answer UI, sources panel, trace viewer | 0.5 hr |
+| 7 | Hardening (edge cases, session recovery, security) | 0.5 hr |
+| 8 | Code review, security review, final eval | 0.5 hr |
+| 9 | UI overhaul, speed fixes, README, architecture | 1 hr |
+| **Total** | | **~8 hr** |
