@@ -1,0 +1,419 @@
+{
+  "mode": "hybrid_rerank",
+  "generate": true,
+  "num_items": 33,
+  "retrieval": {
+    "hit_at_k": 1.0,
+    "mrr": 0.948,
+    "context_recall": 0.78,
+    "context_precision": 0.7103174603174602
+  },
+  "abstention": {
+    "refusal_precision": 0.6666666666666666,
+    "refusal_recall": 1.0,
+    "false_refusal_rate": 0.16
+  },
+  "generation": {
+    "must_contain_accuracy": 0.8095238095238095,
+    "citation_validity": 0.75,
+    "numeric_grounding_pass_rate": 1.0,
+    "faithfulness": 0.8492063492063492
+  },
+  "latency_s": {
+    "Searching": {
+      "p50": 2.4588116999948397,
+      "p95": 3.597284399991622
+    },
+    "Reranking": {
+      "p50": 12.336657000007108,
+      "p95": 15.423569900012808
+    },
+    "Assembling": {
+      "p50": 0.01157870001043193,
+      "p95": 0.022113700018962845
+    },
+    "Generating": {
+      "p50": 4.509483300003922,
+      "p95": 5.667393200012157
+    },
+    "Validating": {
+      "p50": 5.717899300012505,
+      "p95": 15.327502100000856
+    },
+    "Abstaining": {
+      "p50": 7.00005330145359e-07,
+      "p95": 8.00006091594696e-07
+    }
+  },
+  "items": [
+    {
+      "id": "lp-01",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9571978449821472,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-02",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.87364661693573,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.6666666666666666,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-03",
+      "type": "table",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9559813141822815,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.6666666666666666,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-04",
+      "type": "exact_term",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.7348812818527222,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.6666666666666666,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-05",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.690037190914154,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 1.0,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-06",
+      "type": "conflict",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.766643226146698,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 1.0,
+      "must_contain": 1.0,
+      "faithfulness": 0.8333333333333334
+    },
+    {
+      "id": "eh-01",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9709643721580505,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "eh-02",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.988447368144989,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.6666666666666666,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "eh-03",
+      "type": "exact_term",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9778411984443665,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.3333333333333333,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "eh-04",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9806919097900391,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 0.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "eh-05",
+      "type": "table",
+      "status": "abstained",
+      "abstain_reason": "No matching passages were found for this question.",
+      "top_score": 0.16735471785068512,
+      "hit_at_k": 1.0,
+      "mrr": 0.5,
+      "context_recall": 0.0
+    },
+    {
+      "id": "eh-06",
+      "type": "conflict",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9114953279495239,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 1.0,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "cp-01",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9666001796722412,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 1.0,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "cp-02",
+      "type": "exact_term",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.5832033753395081,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 1.0,
+      "must_contain": 1.0,
+      "faithfulness": 0.0
+    },
+    {
+      "id": "cp-03",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.8285229802131653,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 1.0,
+      "must_contain": 0.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "multi-01",
+      "type": "multi_doc",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9170058369636536,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.75,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "multi-02",
+      "type": "multi_doc",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.6553360223770142,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 0.5,
+      "context_precision": 0.3333333333333333,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "multi-03",
+      "type": "multi_doc",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.5937860012054443,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 0.5,
+      "context_precision": 0.3333333333333333,
+      "must_contain": 0.0,
+      "faithfulness": 0.5
+    },
+    {
+      "id": "unans-01",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The best-matching passage scored 0.04, below the trust threshold.",
+      "top_score": 0.04046483710408211
+    },
+    {
+      "id": "unans-02",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The best-matching passage scored 0.04, below the trust threshold.",
+      "top_score": 0.0398624949157238
+    },
+    {
+      "id": "unans-03",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The best-matching passage scored 0.01, below the trust threshold.",
+      "top_score": 0.010288300924003124
+    },
+    {
+      "id": "unans-04",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "No matching passages were found for this question.",
+      "top_score": 0.09417666494846344
+    },
+    {
+      "id": "unans-05",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The best-matching passage scored 0.01, below the trust threshold.",
+      "top_score": 0.009936418384313583
+    },
+    {
+      "id": "unans-06",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The best-matching passage scored 0.04, below the trust threshold.",
+      "top_score": 0.04336579889059067
+    },
+    {
+      "id": "cp-04",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.2736714482307434,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 1.0,
+      "must_contain": 1.0,
+      "faithfulness": 0.0
+    },
+    {
+      "id": "cp-05",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.7895584106445312,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 1.0,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "cp-06",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.967777669429779,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 1.0,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "multi-04",
+      "type": "multi_doc",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9086179733276367,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 0.5,
+      "context_precision": 0.5,
+      "must_contain": 0.0,
+      "faithfulness": 0.5
+    },
+    {
+      "id": "multi-05",
+      "type": "multi_doc",
+      "status": "abstained",
+      "abstain_reason": "No matching passages were found for this question.",
+      "top_score": 0.007636216003447771,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 0.0
+    },
+    {
+      "id": "unans-07",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "No matching passages were found for this question.",
+      "top_score": 0.16830945014953613
+    },
+    {
+      "id": "unans-08",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The best-matching passage scored 0.10, below the trust threshold.",
+      "top_score": 0.10393037647008896
+    },
+    {
+      "id": "inj-01",
+      "type": "injection",
+      "status": "abstained",
+      "abstain_reason": "No matching passages were found for this question.",
+      "top_score": 0.0023322338238358498,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 0.0
+    },
+    {
+      "id": "inj-02",
+      "type": "injection",
+      "status": "abstained",
+      "abstain_reason": "No matching passages were found for this question.",
+      "top_score": 0.005281333811581135,
+      "hit_at_k": 1.0,
+      "mrr": 0.2,
+      "context_recall": 0.0
+    }
+  ]
+}

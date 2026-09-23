@@ -1,0 +1,181 @@
+{
+  "mode": "hybrid",
+  "curve": [
+    {
+      "threshold": 0.0,
+      "balanced_accuracy": 0.5,
+      "tp": 0,
+      "fp": 0,
+      "tn": 20,
+      "fn": 6
+    },
+    {
+      "threshold": 0.05,
+      "balanced_accuracy": 0.7833333333333333,
+      "tp": 4,
+      "fp": 2,
+      "tn": 18,
+      "fn": 2
+    },
+    {
+      "threshold": 0.1,
+      "balanced_accuracy": 0.7833333333333333,
+      "tp": 4,
+      "fp": 2,
+      "tn": 18,
+      "fn": 2
+    },
+    {
+      "threshold": 0.15,
+      "balanced_accuracy": 0.8416666666666667,
+      "tp": 5,
+      "fp": 3,
+      "tn": 17,
+      "fn": 1
+    },
+    {
+      "threshold": 0.2,
+      "balanced_accuracy": 0.8416666666666667,
+      "tp": 5,
+      "fp": 3,
+      "tn": 17,
+      "fn": 1
+    },
+    {
+      "threshold": 0.25,
+      "balanced_accuracy": 0.925,
+      "tp": 6,
+      "fp": 3,
+      "tn": 17,
+      "fn": 0
+    },
+    {
+      "threshold": 0.3,
+      "balanced_accuracy": 0.925,
+      "tp": 6,
+      "fp": 3,
+      "tn": 17,
+      "fn": 0
+    },
+    {
+      "threshold": 0.35,
+      "balanced_accuracy": 0.925,
+      "tp": 6,
+      "fp": 3,
+      "tn": 17,
+      "fn": 0
+    },
+    {
+      "threshold": 0.4,
+      "balanced_accuracy": 0.925,
+      "tp": 6,
+      "fp": 3,
+      "tn": 17,
+      "fn": 0
+    },
+    {
+      "threshold": 0.45,
+      "balanced_accuracy": 0.9,
+      "tp": 6,
+      "fp": 4,
+      "tn": 16,
+      "fn": 0
+    },
+    {
+      "threshold": 0.5,
+      "balanced_accuracy": 0.9,
+      "tp": 6,
+      "fp": 4,
+      "tn": 16,
+      "fn": 0
+    },
+    {
+      "threshold": 0.55,
+      "balanced_accuracy": 0.9,
+      "tp": 6,
+      "fp": 4,
+      "tn": 16,
+      "fn": 0
+    },
+    {
+      "threshold": 0.6,
+      "balanced_accuracy": 0.85,
+      "tp": 6,
+      "fp": 6,
+      "tn": 14,
+      "fn": 0
+    },
+    {
+      "threshold": 0.65,
+      "balanced_accuracy": 0.85,
+      "tp": 6,
+      "fp": 6,
+      "tn": 14,
+      "fn": 0
+    },
+    {
+      "threshold": 0.7,
+      "balanced_accuracy": 0.8,
+      "tp": 6,
+      "fp": 8,
+      "tn": 12,
+      "fn": 0
+    },
+    {
+      "threshold": 0.75,
+      "balanced_accuracy": 0.8,
+      "tp": 6,
+      "fp": 8,
+      "tn": 12,
+      "fn": 0
+    },
+    {
+      "threshold": 0.8,
+      "balanced_accuracy": 0.8,
+      "tp": 6,
+      "fp": 8,
+      "tn": 12,
+      "fn": 0
+    },
+    {
+      "threshold": 0.85,
+      "balanced_accuracy": 0.775,
+      "tp": 6,
+      "fp": 9,
+      "tn": 11,
+      "fn": 0
+    },
+    {
+      "threshold": 0.9,
+      "balanced_accuracy": 0.75,
+      "tp": 6,
+      "fp": 10,
+      "tn": 10,
+      "fn": 0
+    },
+    {
+      "threshold": 0.95,
+      "balanced_accuracy": 0.725,
+      "tp": 6,
+      "fp": 11,
+      "tn": 9,
+      "fn": 0
+    },
+    {
+      "threshold": 1.0,
+      "balanced_accuracy": 0.5,
+      "tp": 6,
+      "fp": 20,
+      "tn": 0,
+      "fn": 0
+    }
+  ],
+  "best": {
+    "threshold": 0.25,
+    "balanced_accuracy": 0.925,
+    "tp": 6,
+    "fp": 3,
+    "tn": 17,
+    "fn": 0
+  }
+}

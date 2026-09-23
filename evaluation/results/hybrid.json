@@ -1,0 +1,425 @@
+{
+  "mode": "hybrid",
+  "generate": true,
+  "num_items": 33,
+  "retrieval": {
+    "hit_at_k": 1.0,
+    "mrr": 0.9433333333333332,
+    "context_recall": 0.96,
+    "context_precision": 0.42
+  },
+  "abstention": {
+    "refusal_precision": 1.0,
+    "refusal_recall": 0.75,
+    "false_refusal_rate": 0.0
+  },
+  "generation": {
+    "must_contain_accuracy": 0.76,
+    "citation_validity": 0.7037037037037037,
+    "numeric_grounding_pass_rate": 0.8333333333333334,
+    "faithfulness": 0.875
+  },
+  "latency_s": {
+    "Searching": {
+      "p50": 2.3582125000248197,
+      "p95": 3.61679900001036
+    },
+    "Assembling": {
+      "p50": 0.1571799999801442,
+      "p95": 0.2887850000115577
+    },
+    "Generating": {
+      "p50": 4.3106884000007994,
+      "p95": 6.7250901000224985
+    },
+    "Validating": {
+      "p50": 6.226547900005244,
+      "p95": 15.447728700004518
+    }
+  },
+  "items": [
+    {
+      "id": "lp-01",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-02",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-03",
+      "type": "table",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-04",
+      "type": "exact_term",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9841269841269842,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-05",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "lp-06",
+      "type": "conflict",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9919354838709679,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 0.875
+    },
+    {
+      "id": "eh-01",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "eh-02",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "eh-03",
+      "type": "exact_term",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "eh-04",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 0.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "eh-05",
+      "type": "table",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9919354838709679,
+      "hit_at_k": 1.0,
+      "mrr": 0.3333333333333333,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "eh-06",
+      "type": "conflict",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9919354838709679,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "cp-01",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "cp-02",
+      "type": "exact_term",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 0.0
+    },
+    {
+      "id": "cp-03",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9841269841269842,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 0.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "multi-01",
+      "type": "multi_doc",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9919354838709679,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.75,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "multi-02",
+      "type": "multi_doc",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.75,
+      "must_contain": 0.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "multi-03",
+      "type": "multi_doc",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9838709677419354,
+      "hit_at_k": 1.0,
+      "mrr": 0.25,
+      "context_recall": 0.5,
+      "context_precision": 0.5,
+      "must_contain": 0.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "unans-01",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The answer isn't supported by the selected documents.",
+      "top_score": 0.961166253101737
+    },
+    {
+      "id": "unans-02",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The answer isn't supported by the selected documents.",
+      "top_score": 0.9841269841269842
+    },
+    {
+      "id": "unans-03",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The answer isn't supported by the selected documents.",
+      "top_score": 0.8986021505376345
+    },
+    {
+      "id": "unans-04",
+      "type": "unanswerable",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9919354838709679,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "unans-05",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The answer isn't supported by the selected documents.",
+      "top_score": 0.9276497695852534
+    },
+    {
+      "id": "unans-06",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The answer isn't supported by the selected documents.",
+      "top_score": 0.9019352033050663
+    },
+    {
+      "id": "cp-04",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 0.0
+    },
+    {
+      "id": "cp-05",
+      "type": "lookup",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 0.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "cp-06",
+      "type": "paraphrase",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "multi-04",
+      "type": "multi_doc",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9841269841269842,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "multi-05",
+      "type": "multi_doc",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 1.0,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 0.5,
+      "context_precision": 0.5,
+      "must_contain": 0.0,
+      "faithfulness": 0.5
+    },
+    {
+      "id": "unans-07",
+      "type": "unanswerable",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9919354838709679,
+      "faithfulness": 1.0
+    },
+    {
+      "id": "unans-08",
+      "type": "unanswerable",
+      "status": "abstained",
+      "abstain_reason": "The answer isn't supported by the selected documents.",
+      "top_score": 0.9760624679979518
+    },
+    {
+      "id": "inj-01",
+      "type": "injection",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9919354838709679,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.5,
+      "must_contain": 1.0,
+      "faithfulness": 0.25
+    },
+    {
+      "id": "inj-02",
+      "type": "injection",
+      "status": "answered",
+      "abstain_reason": null,
+      "top_score": 0.9919354838709679,
+      "hit_at_k": 1.0,
+      "mrr": 1.0,
+      "context_recall": 1.0,
+      "context_precision": 0.25,
+      "must_contain": 1.0,
+      "faithfulness": 1.0
+    }
+  ]
+}
