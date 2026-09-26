@@ -1003,3 +1003,151 @@ mark.doc-highlight {
 }
 
 
+
+/* ================================================================
+   Auth screen
+   ================================================================ */
+.auth-screen {
+  min-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 24rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-5);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  animation: fadeSlideDown 0.5s ease both;
+}
+
+.auth-title {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  text-align: center;
+}
+
+.auth-sub {
+  margin-top: calc(-1 * var(--space-2));
+  margin-bottom: var(--space-2);
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.auth-field { display: flex; flex-direction: column; gap: var(--space-1); }
+
+.auth-field span {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.auth-field input {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+  color: var(--text);
+  font-size: 0.9rem;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.auth-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.auth-error {
+  color: var(--danger);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.auth-submit {
+  margin-top: var(--space-2);
+  padding: 0.65rem;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.auth-submit:hover:not(:disabled) { opacity: 0.88; }
+.auth-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.auth-toggle {
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  text-decoration: underline;
+}
+
+.auth-toggle:hover { color: var(--text); }
+
+.auth-note {
+  color: var(--text-faint);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* ================================================================
+   Account chip
+   ================================================================ */
+.account-chip {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0.4rem 0.4rem 0.4rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  font-size: 0.75rem;
+}
+
+.account-identity { display: flex; flex-direction: column; line-height: 1.25; }
+.account-tenant { color: var(--text); font-weight: 600; }
+.account-email { color: var(--text-faint); font-size: 0.68rem; }
+
+.account-role {
+  padding: 0.15rem 0.45rem;
+  border-radius: var(--radius-pill);
+  background: var(--accent-dim);
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.account-signout {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  transition: color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+
+.account-signout:hover { color: var(--text); border-color: var(--line-soft); }

@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from src.auth.principal import Principal
 from src.core.cache import ANSWER_CACHE
 from src.core.config import SETTINGS
 from src.core.errors import GenerationError, ModelUnavailable
@@ -36,8 +37,14 @@ OnToken = Callable[[str], None]
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\[])")
 _CITE_STRIP_RE = re.compile(r"\s*\[\d+\]")
 
-def _cache_key(question: str, doc_ids: list[str], mode: str, generate: bool) -> str:
-    raw = "\x1f".join([question.strip(), "|".join(sorted(doc_ids)), mode, str(generate)])
+def _cache_key(
+    tenant_id: str, question: str, doc_ids: list[str], mode: str, generate: bool
+) -> str:
+    # tenant_id is part of the key: without it two tenants asking the same question of
+    # same-named documents would share one cached answer.
+    raw = "\x1f".join(
+        [tenant_id, question.strip(), "|".join(sorted(doc_ids)), mode, str(generate)]
+    )
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -110,6 +117,7 @@ def answer_question(
     client: Provider,
     keyword_index: KeywordIndex,
     reranker: Reranker,
+    principal: Principal,
     mode: str = SETTINGS.retrieval.mode,
     on_stage: Optional[OnStage] = None,
     on_token: Optional[OnToken] = None,
@@ -117,10 +125,11 @@ def answer_question(
     generate: bool = True,
 ) -> Answer:
     trace = Trace()
+    tenant_id = principal.tenant_id
 
     cache_key: Optional[str] = None
     if not history:
-        cache_key = _cache_key(question, doc_ids, mode, generate)
+        cache_key = _cache_key(tenant_id, question, doc_ids, mode, generate)
         cached: Optional[Answer] = ANSWER_CACHE.get(cache_key)
         if cached is not None:
             if on_token is not None and cached.answer_text:
@@ -137,9 +146,17 @@ def answer_question(
             # runs concurrently with the condense/expansion LLM call(s) below, instead of
             # waiting on them serially.
             raw_vector = embedder.encode_query([question])[0]
-            raw_dense_future = pool.submit(store.query, raw_vector, SETTINGS.retrieval.dense_k, doc_ids)
+            raw_dense_future = pool.submit(
+                store.query, raw_vector, SETTINGS.retrieval.dense_k, doc_ids, tenant_id
+            )
             lexical_future = (
-                pool.submit(keyword_index.query, question, SETTINGS.retrieval.lexical_k, doc_ids)
+                pool.submit(
+                    keyword_index.query,
+                    question,
+                    SETTINGS.retrieval.lexical_k,
+                    doc_ids,
+                    tenant_id,
+                )
                 if mode != "dense"
                 else None
             )
@@ -163,7 +180,10 @@ def answer_question(
             if extra_texts:
                 extra_vectors = embedder.encode_query(extra_texts)
                 extra_dense_future = pool.submit(
-                    lambda: [store.query(v, SETTINGS.retrieval.dense_k, doc_ids) for v in extra_vectors]
+                    lambda: [
+                        store.query(v, SETTINGS.retrieval.dense_k, doc_ids, tenant_id)
+                        for v in extra_vectors
+                    ]
                 )
 
             raw_hits = raw_dense_future.result()
@@ -229,7 +249,7 @@ def answer_question(
         )
 
     with trace.stage("Assembling context", on_stage) as payload:
-        sources, unused, context_chunk_ids = _assemble_sources(hits, doc_ids, store)
+        sources, unused, context_chunk_ids = _assemble_sources(hits, store, tenant_id)
         payload["sources"] = len(sources)
         payload["context_chunk_ids"] = context_chunk_ids
 
@@ -410,9 +430,11 @@ def _agree_in_top_ranks(top: FusedHit) -> bool:
 
 
 def _assemble_sources(
-    hits: list[Hit], doc_ids: list[str], store: VectorStore
+    hits: list[Hit], store: VectorStore, tenant_id: str
 ) -> tuple[list[Source], list[UnusedPassage], list[str]]:
-    parents = _parent_index(doc_ids)
+    # Parents are loaded for the documents that actually matched, not for everything the
+    # caller selected: the hits have already been through the tenant filter.
+    parents = _parent_index([hit.doc_id for hit in hits])
     best_hit: dict[str, Hit] = {}
     order: list[str] = []
     for hit in hits:
@@ -422,7 +444,7 @@ def _assemble_sources(
             best_hit[hit.parent_id] = hit
 
     order.sort(key=lambda pid: best_hit[pid].score, reverse=True)
-    order = _mmr_order(order, best_hit, store)
+    order = _mmr_order(order, best_hit, store, tenant_id)
     order = _diversify(order, best_hit, parents)
 
     sources: list[Source] = []
@@ -456,13 +478,15 @@ def _assemble_sources(
     return sources, unused, context_chunk_ids
 
 
-def _mmr_order(order: list[str], best_hit: dict[str, Hit], store: VectorStore) -> list[str]:
+def _mmr_order(
+    order: list[str], best_hit: dict[str, Hit], store: VectorStore, tenant_id: str
+) -> list[str]:
     if len(order) <= 2:
         return order
     # Child chunks were already embedded at ingest time; reuse those vectors instead of
     # re-encoding the matched spans on every query (B6).
     chunk_ids = [best_hit[pid].chunk_id for pid in order]
-    vectors = store.get_embeddings(chunk_ids)
+    vectors = store.get_embeddings(chunk_ids, tenant_id)
     emb = {pid: vectors[best_hit[pid].chunk_id] for pid in order}
 
     scores = [best_hit[pid].score for pid in order]
@@ -514,7 +538,7 @@ def _diversify(order: list[str], best_hit: dict[str, Hit], parents: dict[str, Pa
 
 def _parent_index(doc_ids: list[str]) -> dict[str, ParentChunk]:
     index: dict[str, ParentChunk] = {}
-    for doc_id in doc_ids:
+    for doc_id in dict.fromkeys(doc_ids):
         for parent in load_parents(doc_id):
             index[parent.parent_id] = parent
     return index

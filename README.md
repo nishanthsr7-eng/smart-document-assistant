@@ -82,6 +82,7 @@ frontend/                Presentation layer (React SPA)
 
 src/                     Business logic (UI-agnostic, testable)
   api/                   FastAPI REST layer
+  auth/                  Principal, password hashing, JWT, user service, audit log
   core/                  Config, errors, tracing
   ingestion/             Parse -> chunk -> index pipeline
   retrieval/             Embedder, pgvector store, tsvector lexical index, hybrid search, reranker
@@ -90,7 +91,7 @@ src/                     Business logic (UI-agnostic, testable)
   storage/               Postgres engine/session, ORM models, object store, Redis cache and locks
 
 migrations/              Alembic schema migrations
-docker-compose.yml       Postgres (pgvector), Redis, MinIO
+docker-compose.yml       Postgres (pgvector), Redis, object store
 
 evaluation/              Golden set (33 items) + metrics runner
 data/sample_docs/        Three real public-domain U.S. government documents
@@ -151,6 +152,8 @@ copy .env.example .env        # Windows
 # cp .env.example .env        # Linux/Mac
 # edit .env and set GEMINI_API_KEY (or switch LLM_PROVIDER=ollama, see Provider Choice)
 # the DATABASE_URL / REDIS_URL / S3_* defaults already match docker-compose.yml
+# set JWT_SECRET -- the API will not start without it:
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 # 5. Start the shared state backends and apply the schema
 docker compose up -d
@@ -178,7 +181,26 @@ ollama serve
 # (keep this terminal open)
 ```
 
-The app opens at `http://localhost:5173`. Upload a PDF or TXT file, wait for indexing, then ask a question.
+The app opens at `http://localhost:5173`. Create a workspace on the sign-in screen (the first user
+of a workspace is its admin), then upload a PDF or TXT file, wait for indexing, and ask a question.
+
+### Accounts and tenancy
+
+Documents, chunks, answers and the audit log are scoped to a workspace (tenant). A caller's tenant
+is read from their bearer token, never from a request parameter, and the tenant filter is applied
+inside the retrieval layer, so passing another workspace's `doc_id` returns nothing rather than
+erroring. Roles are ordered:
+
+| Role | Can |
+|---|---|
+| `viewer` | List documents, ask questions |
+| `editor` | ...and upload and delete documents |
+| `admin` | ...and create users, read the audit log and the dead-letter queue |
+
+`POST /auth/register` creates a workspace and its first admin; that admin adds the rest with
+`POST /auth/users`. Uploads, queries and deletions are written to `audit_log` and readable by the
+workspace's admins at `GET /audit`. `tests/test_tenancy.py` asserts that no retrieval path,
+delete, job read or cache entry crosses a workspace boundary.
 
 ### Environment Variables
 
@@ -197,6 +219,8 @@ The app opens at `http://localhost:5173`. Upload a PDF or TXT file, wait for ind
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | _(required)_ | Object store credentials |
 | `S3_REGION` | `us-east-1` | Object store region |
 | `DB_POOL_SIZE` / `DB_POOL_MAX_OVERFLOW` | `5` / `10` | SQLAlchemy connection pool sizing |
+| `JWT_SECRET` | _(required)_ | HS256 signing key for access tokens |
+| `ACCESS_TOKEN_TTL_S` | `43200` | Access token lifetime in seconds |
 | `HF_TOKEN` | _(empty)_ | Optional; only needed for gated HF models or to avoid anonymous rate limits on embedder/reranker downloads |
 
 ### Running Tests

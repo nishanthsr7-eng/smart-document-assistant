@@ -25,6 +25,9 @@ pgvector==0.5.0
 redis==5.3.1
 boto3==1.43.103
 
+# Auth: HS256 access tokens. Password hashing is stdlib scrypt.
+pyjwt==2.15.0
+
 # Ingest job queue: parsing and embedding run in a worker, not on the request path.
 arq==0.28.0
 

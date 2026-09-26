@@ -1,18 +1,44 @@
-import hashlib
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api import deps, router
+from src.auth.principal import Principal
 from src.core.config import SETTINGS
+from src.ingestion.pipeline import doc_id_for
 
 PDF_BYTES = b"%PDF-1.4\n%mock pdf content\n"
+
+EDITOR = Principal(
+    user_id="00000000-0000-0000-0000-000000000001",
+    tenant_id="00000000-0000-0000-0000-0000000000aa",
+    email="editor@acme.test",
+    role="editor",
+)
+VIEWER = Principal(**{**EDITOR.__dict__, "role": "viewer"})
+
+
+@pytest.fixture
+def anon_client():
+    """No credentials: exercises the 401 path."""
+    return TestClient(router.app)
 
 
 @pytest.fixture
 def client():
-    return TestClient(router.app)
+    # The principal is injected rather than logged in for: these tests assert routing and
+    # validation, and token issuing is covered in test_auth.py.
+    router.app.dependency_overrides[deps.current_principal] = lambda: EDITOR
+    yield TestClient(router.app)
+    router.app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def viewer_client():
+    router.app.dependency_overrides[deps.current_principal] = lambda: VIEWER
+    yield TestClient(router.app)
+    router.app.dependency_overrides.clear()
 
 
 class _FakeVectorStore:
@@ -43,7 +69,7 @@ class _FakeQueue:
     def __init__(self) -> None:
         self.enqueued: list[tuple] = []
 
-    async def enqueue_job(self, fn, doc_id, filename, job_id, _job_id, _queue_name):
+    async def enqueue_job(self, fn, doc_id, filename, job_id, owner, _job_id, _queue_name):
         if any(job[3] == _job_id for job in self.enqueued):
             return None
         self.enqueued.append((fn, doc_id, filename, _job_id))
@@ -68,11 +94,13 @@ def fake_queue(monkeypatch):
 
     monkeypatch.setattr(router.jobs, "pool", pool)
     monkeypatch.setattr(router.jobs, "claim", claim)
-    monkeypatch.setattr(router.jobs, "get", lambda job_id: state.get(job_id))
+    monkeypatch.setattr(
+        router.jobs, "get", lambda job_id, tenant_id=None: state.get(job_id)
+    )
     monkeypatch.setattr(
         router.jobs,
         "record_queued",
-        lambda job_id, doc_id, filename: state.update(
+        lambda job_id, doc_id, filename, owner: state.update(
             {
                 job_id: {
                     "job_id": job_id,
@@ -95,7 +123,7 @@ def test_ingest_queues_a_job_instead_of_parsing_inline(client, fake_queue):
     body = resp.json()
     assert body["status"] == "queued"
     assert body["report"] is None
-    assert body["job_id"] == f"ingest:{hashlib.sha256(PDF_BYTES).hexdigest()}"
+    assert body["job_id"] == f"ingest:{doc_id_for(EDITOR.tenant_id, PDF_BYTES)}"
     assert len(fake_queue.queue.enqueued) == 1
     assert fake_queue.queue.enqueued[0][0] == "ingest_job"
 
@@ -188,9 +216,18 @@ def test_query_rejects_special_character_heavy_question(client):
 
 
 def test_documents_list_and_delete_round_trip(client, fake_infra, monkeypatch):
-    docs = [{"doc_id": "d1", "filename": "policy.pdf", "pages": 2, "num_children": 3}]
-    monkeypatch.setattr(router, "list_indexed", lambda: docs)
-    monkeypatch.setattr(router, "delete", lambda doc_id: None)
+    docs = [
+        {
+            "doc_id": "d1",
+            "filename": "policy.pdf",
+            "pages": 2,
+            "num_children": 3,
+            "owner_id": EDITOR.user_id,
+        }
+    ]
+    monkeypatch.setattr(router, "list_indexed", lambda tenant_id: docs)
+    monkeypatch.setattr(router, "delete", lambda doc_id, actor: None)
+    monkeypatch.setattr(router.audit, "record", lambda *a, **k: None)
 
     list_resp = client.get("/documents")
     assert list_resp.status_code == 200
@@ -199,3 +236,56 @@ def test_documents_list_and_delete_round_trip(client, fake_infra, monkeypatch):
     delete_resp = client.delete("/documents/d1")
     assert delete_resp.status_code == 200
     assert delete_resp.json() == {"status": "deleted", "doc_id": "d1"}
+
+
+# --- authentication and authorization ---
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("get", "/documents"),
+        ("post", "/query"),
+        ("delete", "/documents/d1"),
+        ("get", "/jobs/ingest:abc"),
+        ("get", "/audit"),
+        ("get", "/auth/me"),
+        ("get", "/jobs/dead-letters"),
+    ],
+)
+def test_protected_endpoints_reject_an_anonymous_caller(anon_client, method, path):
+    body = {"json": {"question": "hi", "doc_ids": []}} if method == "post" else {}
+    resp = getattr(anon_client, method)(path, **body)
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"] == "Bearer"
+
+
+@pytest.mark.parametrize("path", ["/livez", "/config"])
+def test_probe_and_config_stay_public(anon_client, path):
+    assert anon_client.get(path).status_code == 200
+
+
+def test_a_viewer_cannot_upload(viewer_client):
+    resp = viewer_client.post("/ingest", files={"file": ("p.pdf", PDF_BYTES, "application/pdf")})
+    assert resp.status_code == 403
+    assert "editor" in resp.json()["detail"]
+
+
+def test_a_viewer_cannot_delete(viewer_client):
+    assert viewer_client.delete("/documents/d1").status_code == 403
+
+
+def test_an_editor_cannot_read_the_audit_log_or_manage_users(client):
+    assert client.get("/audit").status_code == 403
+    assert client.get("/auth/users").status_code == 403
+    assert (
+        client.post(
+            "/auth/users", json={"email": "x@acme.test", "password": "a-password-1", "role": "viewer"}
+        ).status_code
+        == 403
+    )
+
+
+def test_a_garbage_bearer_token_is_401(anon_client):
+    resp = anon_client.get("/documents", headers={"Authorization": "Bearer not-a-jwt"})
+    assert resp.status_code == 401

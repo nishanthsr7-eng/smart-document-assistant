@@ -3,16 +3,24 @@ import concurrent.futures
 import pytest
 from sqlalchemy import func, select
 
+from src.auth.principal import Principal
 from src.core.cache import ANSWER_CACHE
 from src.core.config import SETTINGS
 from src.ingestion import pipeline
 from src.storage import objects
 from src.storage.db import session
-from src.storage.models import Chunk, Document
+from src.storage.models import Chunk, Document, Tenant
 
 DOC = b"1 Policy\n\nEmployees accrue leave each pay period. Sick leave is separate.\n\n- rule one\n- rule two"
 
 pytestmark = pytest.mark.usefixtures("clean_state")
+
+OWNER = Principal(
+    user_id="00000000-0000-0000-0000-000000000001",
+    tenant_id="00000000-0000-0000-0000-0000000000aa",
+    email="owner@acme.test",
+    role="admin",
+)
 
 DIM = SETTINGS.storage.embedding_dim
 
@@ -23,7 +31,14 @@ class _FakeEmbedder:
 
 
 def _ingest_live(filename: str, data: bytes) -> pipeline.IngestReport:
-    return pipeline.ingest(filename, data, _FakeEmbedder())
+    return pipeline.ingest(filename, data, _FakeEmbedder(), OWNER)
+
+
+@pytest.fixture(autouse=True)
+def owner_tenant(clean_state):
+    """documents.tenant_id is a foreign key, so the owner's tenant must exist first."""
+    with session() as sess:
+        sess.add(Tenant(tenant_id=OWNER.tenant_id, name="pipeline-tests"))
 
 
 def test_first_ingest_indexes(clean_state):
@@ -37,7 +52,7 @@ def test_first_ingest_indexes(clean_state):
 
 def test_reingest_same_bytes_is_duplicate(clean_state):
     first = _ingest_live("policy.txt", DOC)
-    second = pipeline.ingest("policy.txt", DOC, _FakeEmbedder())
+    second = pipeline.ingest("policy.txt", DOC, _FakeEmbedder(), OWNER)
     assert second.outcome == "duplicate"
     assert second.doc_id == first.doc_id
     assert second.num_children == first.num_children
@@ -57,7 +72,7 @@ def test_same_filename_new_content_replaces(clean_state):
 
 def test_ingest_stores_embeddings_and_lists_the_document(clean_state):
     report = _ingest_live("policy.txt", DOC)
-    assert [e["doc_id"] for e in pipeline.list_indexed()] == [report.doc_id]
+    assert [e["doc_id"] for e in pipeline.list_indexed(OWNER.tenant_id)] == [report.doc_id]
     with session() as sess:
         missing = sess.scalar(
             select(func.count()).select_from(Chunk).where(Chunk.embedding.is_(None))
@@ -67,15 +82,15 @@ def test_ingest_stores_embeddings_and_lists_the_document(clean_state):
 
 def test_list_indexed_reflects_documents(clean_state):
     report = _ingest_live("policy.txt", DOC)
-    entries = {e["doc_id"]: e for e in pipeline.list_indexed()}
+    entries = {e["doc_id"]: e for e in pipeline.list_indexed(OWNER.tenant_id)}
     assert entries[report.doc_id]["filename"] == "policy.txt"
     assert entries[report.doc_id]["num_children"] == report.num_children
 
 
 def test_delete_removes_rows_and_blobs(clean_state):
     report = _ingest_live("policy.txt", DOC)
-    pipeline.delete(report.doc_id)
-    assert pipeline.list_indexed() == []
+    pipeline.delete(report.doc_id, OWNER)
+    assert pipeline.list_indexed(OWNER.tenant_id) == []
     with session() as sess:
         assert sess.scalar(select(func.count()).select_from(Chunk)) == 0
 
@@ -83,7 +98,7 @@ def test_delete_removes_rows_and_blobs(clean_state):
 def test_roundtrip_parents_and_children(clean_state):
     report = _ingest_live("policy.txt", DOC)
     parents = pipeline.load_parents(report.doc_id)
-    children = pipeline.load_children(report.doc_id)
+    children = pipeline.load_children(report.doc_id, OWNER.tenant_id)
     assert len(parents) == report.num_parents
     assert len(children) == report.num_children
     assert all(isinstance(c.section_path, tuple) for c in children)

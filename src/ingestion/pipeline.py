@@ -8,8 +8,10 @@ from sqlalchemy import delete as sa_delete
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert
 
+from src.auth.principal import Principal
 from src.core.cache import ANSWER_CACHE, DOC_CACHE
 from src.core.config import SETTINGS
+from src.core.errors import DocumentNotFound, PermissionDenied
 from src.core.tracing import OnStage
 from src.ingestion.chunker import ChildChunk, ParentChunk, chunk_document
 from src.ingestion.parsers import Element, FigureCaptioner, parse, validate_upload
@@ -20,6 +22,13 @@ from src.storage.models import Chunk, Document
 from src.storage.redis_client import lock
 
 Outcome = Literal["indexed", "replaced", "duplicate"]
+
+
+def doc_id_for(tenant_id: str, data: bytes) -> str:
+    """Tenant-salted content hash: identical bytes uploaded by two tenants are two
+    documents, and no tenant can name another's document by hashing a file it already has.
+    """
+    return hashlib.sha256(tenant_id.encode() + b"\x00" + data).hexdigest()
 
 
 class Embedding(Protocol):
@@ -42,6 +51,7 @@ def ingest(
     filename: str,
     data: bytes,
     embedder: Embedding,
+    owner: Principal,
     captioner: Optional[FigureCaptioner] = None,
     on_stage: Optional[OnStage] = None,
 ) -> IngestReport:
@@ -52,12 +62,13 @@ def ingest(
     chunk insert then failed on the foreign key.
     """
     extension = validate_upload(filename, data)
-    doc_id = hashlib.sha256(data).hexdigest()
+    doc_id = doc_id_for(owner.tenant_id, data)
 
     # Serialized across workers: the replace-by-filename path is a read-modify-write on the
     # document set, and two concurrent uploads of the same name would otherwise interleave.
-    with lock(f"ingest:{filename}", SETTINGS.storage.ingest_lock_ttl_s):
-        existing = _live_document(doc_id)
+    # Keyed per tenant so one tenant's uploads never block another's.
+    with lock(f"ingest:{owner.tenant_id}:{filename}", SETTINGS.storage.ingest_lock_ttl_s):
+        existing = _live_document(doc_id, owner.tenant_id)
         if existing is not None:
             return IngestReport(
                 doc_id=doc_id,
@@ -69,7 +80,7 @@ def ingest(
                 outcome="duplicate",
             )
 
-        replaced = _find_by_filename(filename, doc_id)
+        replaced = _find_by_filename(filename, doc_id, owner.tenant_id)
 
         _emit(on_stage, "Parsing document")
         elements = parse(extension, data, captioner)
@@ -99,11 +110,11 @@ def ingest(
             outcome="replaced" if replaced else "indexed",
             replaced_doc_id=replaced,
         )
-        _upsert_document(report)
+        _upsert_document(report, owner)
 
         _emit(on_stage, f"Embedding {len(children)} chunks")
         embeddings = embedder.encode([c.embed_text for c in children])
-        VectorStore().add(children, embeddings)
+        VectorStore().add(children, embeddings, owner.tenant_id)
         _mark_live(doc_id)
 
     ANSWER_CACHE.clear()
@@ -115,11 +126,12 @@ def _mark_live(doc_id: str) -> None:
         sess.execute(update(Document).where(Document.doc_id == doc_id).values(state="live"))
 
 
-def list_indexed() -> list[dict]:
+def list_indexed(tenant_id: str) -> list[dict]:
     with session() as sess:
         stmt = (
             select(Document)
             .where(
+                Document.tenant_id == tenant_id,
                 Document.ingest_version == SETTINGS.ingest_version,
                 Document.state == "live",
             )
@@ -131,12 +143,36 @@ def list_indexed() -> list[dict]:
                 "filename": doc.filename,
                 "pages": doc.pages,
                 "num_children": doc.num_children,
+                "owner_id": doc.owner_id,
             }
             for doc in sess.scalars(stmt)
         ]
 
 
-def delete(doc_id: str) -> None:
+def scope_doc_ids(doc_ids: list[str], tenant_id: str) -> list[str]:
+    """Narrow caller-supplied doc_ids to the tenant's live documents.
+
+    A foreign or unknown id is dropped rather than rejected: a 404 here would tell the
+    caller whether that id exists in some other tenant.
+    """
+    if not doc_ids:
+        return []
+    with session() as sess:
+        stmt = select(Document.doc_id).where(
+            Document.tenant_id == tenant_id,
+            Document.state == "live",
+            Document.doc_id.in_(doc_ids),
+        )
+        return list(sess.scalars(stmt))
+
+
+def delete(doc_id: str, actor: Principal) -> None:
+    """Delete a document in the actor's own tenant. A foreign doc_id is a 404, never a delete."""
+    document = _document(doc_id, actor.tenant_id)
+    if document is None:
+        raise DocumentNotFound(doc_id)
+    if not actor.can("admin") and document.owner_id != actor.user_id:
+        raise PermissionDenied("Only the document's owner or an admin can delete it.")
     _purge(doc_id)
     ANSWER_CACHE.clear()
 
@@ -150,6 +186,7 @@ def discard_failed(doc_id: str) -> None:
 
 
 def load_parents(doc_id: str) -> list[ParentChunk]:
+    """Only ever called with doc_ids that came back from tenant-filtered retrieval."""
     payload = DOC_CACHE.get(doc_id)
     if payload is None:
         payload = json.loads(objects.get_parents(doc_id))
@@ -157,33 +194,50 @@ def load_parents(doc_id: str) -> list[ParentChunk]:
     return [_as_parent(p) for p in payload["parents"]]
 
 
-def load_children(doc_id: str) -> list[ChildChunk]:
+def load_children(doc_id: str, tenant_id: str) -> list[ChildChunk]:
     with session() as sess:
-        stmt = select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.ordinal)
+        stmt = (
+            select(Chunk)
+            .where(Chunk.tenant_id == tenant_id, Chunk.doc_id == doc_id)
+            .order_by(Chunk.ordinal)
+        )
         return [_as_child(c) for c in sess.scalars(stmt)]
 
 
-def _live_document(doc_id: str) -> Optional[Document]:
+def _document(doc_id: str, tenant_id: str) -> Optional[Document]:
+    with session() as sess:
+        stmt = select(Document).where(
+            Document.doc_id == doc_id, Document.tenant_id == tenant_id
+        )
+        return sess.scalars(stmt).first()
+
+
+def _live_document(doc_id: str, tenant_id: str) -> Optional[Document]:
     with session() as sess:
         stmt = select(Document).where(
             Document.doc_id == doc_id,
+            Document.tenant_id == tenant_id,
             Document.ingest_version == SETTINGS.ingest_version,
             Document.state == "live",
         )
         return sess.scalars(stmt).first()
 
 
-def _find_by_filename(filename: str, new_doc_id: str) -> Optional[str]:
+def _find_by_filename(filename: str, new_doc_id: str, tenant_id: str) -> Optional[str]:
     with session() as sess:
         stmt = select(Document.doc_id).where(
-            Document.filename == filename, Document.doc_id != new_doc_id
+            Document.tenant_id == tenant_id,
+            Document.filename == filename,
+            Document.doc_id != new_doc_id,
         )
         return sess.scalars(stmt).first()
 
 
-def _upsert_document(report: IngestReport) -> None:
+def _upsert_document(report: IngestReport, owner: Principal) -> None:
     values = {
         "doc_id": report.doc_id,
+        "tenant_id": owner.tenant_id,
+        "owner_id": owner.user_id,
         "filename": report.filename,
         "ingest_version": SETTINGS.ingest_version,
         "pages": report.pages,

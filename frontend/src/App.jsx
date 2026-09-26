@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import * as api from './api'
 import { useDocuments } from './hooks/useDocuments'
 import { useChat } from './hooks/useChat'
+import { useAuth } from './hooks/useAuth'
 
 import LoadingScreen from './components/LoadingScreen'
 import HeroHeader from './components/HeroHeader'
@@ -12,6 +13,8 @@ import ProgressToast from './components/ProgressToast'
 import DocumentDrawer, { DOC_DRAG_TYPE } from './components/DocumentDrawer'
 import HistoryPanel from './components/HistoryPanel'
 import IconPopover from './components/IconPopover'
+import AuthScreen from './components/AuthScreen'
+import AccountChip from './components/AccountChip'
 
 function DocsIcon() {
   return (
@@ -40,6 +43,7 @@ export default function App() {
 
   const docHook = useDocuments()
   const chatHook = useChat()
+  const auth = useAuth()
 
   const chatBottomRef = useRef(null)
   const composerRef = useRef(null)
@@ -47,32 +51,36 @@ export default function App() {
   // ── Bootstrap ──────────────────────────────────────────────────────────────
   useEffect(() => {
     setBgStyle({ '--bg-image': `url("/background.jpg")` })
+  }, [])
 
-    // Poll health until backend is ready
+  // The corpus is per-tenant, so it is loaded after sign-in and dropped on sign-out.
+  useEffect(() => {
+    if (!auth.user) {
+      setReady(false)
+      return
+    }
     let cancelled = false
-    async function pollHealth() {
+    async function bootstrap() {
       while (!cancelled) {
         try {
           await api.getHealth()
-          if (!cancelled) {
-            setReady(true)
-            // Load config and existing documents
-            const cfg = await api.getConfig().catch(() => null)
-            if (cfg) {
-              setModes(cfg.retrieval_modes)
-              setMode(cfg.default_mode)
-            }
-            await docHook.loadFromServer()
-          }
-          return
+          break
         } catch {
           await new Promise((r) => setTimeout(r, 1500))
         }
       }
+      if (cancelled) return
+      const cfg = await api.getConfig().catch(() => null)
+      if (cfg) {
+        setModes(cfg.retrieval_modes)
+        setMode(cfg.default_mode)
+      }
+      await docHook.loadFromServer()
+      if (!cancelled) setReady(true)
     }
-    pollHealth()
+    bootstrap()
     return () => { cancelled = true }
-  }, [])
+  }, [auth.user])
 
   // ── Auto-scroll ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -121,6 +129,18 @@ export default function App() {
     }
   }, [docHook])
 
+  if (!auth.user) {
+    return (
+      <div className="app-bg" style={bgStyle}>
+        {auth.checking ? (
+          <LoadingScreen loaded={false} />
+        ) : (
+          <AuthScreen error={auth.error} onSignIn={auth.signIn} onSignUp={auth.signUp} />
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="app-bg" style={ready ? bgStyle : undefined}>
       {!ready ? (
@@ -131,6 +151,8 @@ export default function App() {
           onDragOver={(e) => e.preventDefault()}
           onDrop={handleDocDrop}
         >
+          <AccountChip user={auth.user} onSignOut={auth.signOut} />
+
           {showHero && <HeroHeader />}
 
           <ChatWindow
@@ -153,6 +175,7 @@ export default function App() {
             mode={mode}
             onModeChange={setMode}
             onSubmit={handleSubmit}
+            canUpload={auth.canUpload}
             onUpload={docHook.uploadFile}
             onToggleScope={docHook.toggleScope}
           />
@@ -174,6 +197,7 @@ export default function App() {
                 scopedIds={docHook.scopedIds}
                 allSelected={docHook.allSelected}
                 busy={chatHook.busy}
+                canRemove={auth.canUpload}
                 onClose={() => setDocsOpen(false)}
                 onRemove={docHook.removeDoc}
                 onToggleScope={docHook.toggleScope}

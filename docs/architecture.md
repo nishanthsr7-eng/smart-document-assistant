@@ -88,7 +88,8 @@ The product thesis, stated once so every decision below can be checked against i
 | trust | `abstention.py` | Hard threshold 0.30, soft band to 0.45 with confidence modifier, consensus override |
 | trust | `citations.py` | Numeric grounding prefilter, cross-encoder support scoring, numeric-disagreement conflict detection, optional NLI (disabled) |
 | trust | `confidence.py` | 4-signal weighted score → High/Medium/Low |
-| api | `router.py`, `schemas.py`, `deps.py` | FastAPI: `/health`, `/documents`, `/ingest`, `/documents/{id}`, `/query` |
+| auth | `principal.py`, `passwords.py`, `tokens.py`, `service.py`, `audit.py` | Tenant-scoped principal, scrypt hashing, HS256 tokens, registration and user management, audit log |
+| api | `router.py`, `schemas.py`, `deps.py` | FastAPI: `/auth/*`, `/health`, `/documents`, `/ingest`, `/documents/{id}`, `/query`, `/jobs/*`, `/audit`; bearer auth and role gates in `deps.py` |
 | frontend | `App.jsx`, `api.js`, `components/*` | React SPA layout, REST API integration, state management, Chat/Composer/Sources/Trace UI |
 | evaluation | `run_eval.py`, `golden_set.yaml` | 26-item golden set; retrieval, abstention and generation metrics + per-stage latency percentiles |
 

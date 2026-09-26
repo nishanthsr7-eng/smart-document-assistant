@@ -1,38 +1,54 @@
 import asyncio
-import hashlib
 import json
 import logging
 import queue
 import threading
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from typing import AsyncIterator
 
 import anyio
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from src.api import deps
 from src.api.schemas import (
+    AuditEventOut,
     ConfigResponse,
     ConfidenceOut,
     ConflictOut,
+    CreateUserRequest,
     DocumentOut,
     HealthResponse,
     JobOut,
+    LoginRequest,
     QueryRequest,
     QueryResponse,
+    RegisterRequest,
     SentenceOut,
     SourceOut,
+    TokenResponse,
+    UserOut,
 )
+from src.auth import audit, service
+from src.auth.principal import Principal
+from src.auth.tokens import issue_access_token
 from src.core.config import SETTINGS
-from src.core.errors import DocumentError, GenerationError, ModelUnavailable
+from src.core.errors import (
+    AuthError,
+    DocumentError,
+    DocumentNotFound,
+    GenerationError,
+    ModelUnavailable,
+    PermissionDenied,
+)
 from src.core.health import check_health
 from src.generation.answerer import Answer, answer_question
 from src.ingestion import jobs
 from src.ingestion.parsers import validate_upload
-from src.ingestion.pipeline import delete, list_indexed
+from src.ingestion.pipeline import delete, doc_id_for, list_indexed, scope_doc_ids
 from src.storage import objects
 
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +72,98 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(AuthError)
+def _auth_error(request: Request, exc: AuthError) -> JSONResponse:
+    return JSONResponse(
+        status_code=401,
+        content={"detail": exc.message},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+@app.exception_handler(PermissionDenied)
+def _permission_denied(request: Request, exc: PermissionDenied) -> JSONResponse:
+    return JSONResponse(status_code=403, content={"detail": exc.message})
+
+
+@app.exception_handler(DocumentNotFound)
+def _document_not_found(request: Request, exc: DocumentNotFound) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": exc.message})
+
+
+# --- auth ---
+
+
+@app.post("/auth/register", response_model=TokenResponse, status_code=201)
+def register(body: RegisterRequest) -> TokenResponse:
+    """Sign up: creates a tenant and its first user, who is that tenant's admin."""
+    principal = service.register_tenant(body.tenant_name, body.email, body.password)
+    audit.record(principal, "register", tenant_name=body.tenant_name)
+    return _token(principal, body.tenant_name)
+
+
+@app.post("/auth/login", response_model=TokenResponse)
+def login(body: LoginRequest) -> TokenResponse:
+    principal = service.authenticate(body.email, body.password)
+    audit.record(principal, "login")
+    return _token(principal, service.tenant_name(principal.tenant_id))
+
+
+@app.get("/auth/me", response_model=UserOut)
+def me(principal: Principal = Depends(deps.current_principal)) -> UserOut:
+    return _user_out(principal, service.tenant_name(principal.tenant_id))
+
+
+@app.get("/auth/users", response_model=list[UserOut])
+def users(principal: Principal = Depends(deps.require_admin)) -> list[UserOut]:
+    name = service.tenant_name(principal.tenant_id)
+    return [
+        UserOut(
+            user_id=u["user_id"],
+            email=u["email"],
+            role=u["role"],
+            tenant_id=principal.tenant_id,
+            tenant_name=name,
+        )
+        for u in service.list_users(principal)
+    ]
+
+
+@app.post("/auth/users", response_model=UserOut, status_code=201)
+def create_user(
+    body: CreateUserRequest, principal: Principal = Depends(deps.require_admin)
+) -> UserOut:
+    """Adds a user to the caller's own tenant. The tenant is never a request parameter."""
+    created = service.create_user(principal, body.email, body.password, body.role)
+    audit.record(principal, "create_user", email=created.email, role=created.role)
+    return _user_out(created, service.tenant_name(principal.tenant_id))
+
+
+@app.get("/audit", response_model=list[AuditEventOut])
+def audit_log(principal: Principal = Depends(deps.require_admin)) -> list[AuditEventOut]:
+    return [AuditEventOut(**event) for event in audit.read(principal)]
+
+
+def _token(principal: Principal, tenant_name: str) -> TokenResponse:
+    token, ttl = issue_access_token(principal)
+    return TokenResponse(
+        access_token=token, expires_in=ttl, user=_user_out(principal, tenant_name)
+    )
+
+
+def _user_out(principal: Principal, tenant_name: str) -> UserOut:
+    return UserOut(
+        user_id=principal.user_id,
+        email=principal.email,
+        role=principal.role,
+        tenant_id=principal.tenant_id,
+        tenant_name=tenant_name,
+    )
+
+
+# --- service ---
+
+
 @app.get("/livez")
 def livez() -> dict[str, str]:
     """Liveness: the process is running. Never touches a backend."""
@@ -77,12 +185,16 @@ def config() -> ConfigResponse:
 
 
 @app.get("/documents", response_model=list[DocumentOut])
-def documents() -> list[DocumentOut]:
-    return [DocumentOut(**doc) for doc in list_indexed()]
+def documents(principal: Principal = Depends(deps.require_viewer)) -> list[DocumentOut]:
+    return [DocumentOut(**doc) for doc in list_indexed(principal.tenant_id)]
 
 
 @app.post("/ingest", response_model=JobOut, status_code=202)
-async def ingest_document(response: Response, file: UploadFile = File(...)) -> JobOut:
+async def ingest_document(
+    response: Response,
+    file: UploadFile = File(...),
+    principal: Principal = Depends(deps.require_editor),
+) -> JobOut:
     """Stage the upload and queue it. Parsing and embedding happen in the ingest worker."""
     data = await file.read()
     filename = file.filename or "upload"
@@ -91,24 +203,27 @@ async def ingest_document(response: Response, file: UploadFile = File(...)) -> J
     except DocumentError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
 
-    doc_id = hashlib.sha256(data).hexdigest()
+    doc_id = doc_id_for(principal.tenant_id, data)
     job_id = jobs.job_id_for(doc_id)
 
-    # Idempotency key is the content hash: the same bytes in flight are one job, not two.
+    # Idempotency key is the tenant-salted content hash: the same bytes in flight are one
+    # job, and two tenants uploading the same file do not collide on it.
     holder = await anyio.to_thread.run_sync(jobs.claim, doc_id, job_id)
     if holder is not None:
-        state = await anyio.to_thread.run_sync(jobs.get, holder)
+        state = await anyio.to_thread.run_sync(jobs.get, holder, principal.tenant_id)
         if state is not None:
             response.status_code = 200
             return JobOut(**state)
 
-    await anyio.to_thread.run_sync(jobs.record_queued, job_id, doc_id, filename)
+    await anyio.to_thread.run_sync(jobs.record_queued, job_id, doc_id, filename, principal)
     await anyio.to_thread.run_sync(objects.put_raw, doc_id, filename, data)
-    await _enqueue(job_id, doc_id, filename)
+    await _enqueue(job_id, doc_id, filename, principal)
     return JobOut(job_id=job_id, doc_id=doc_id, filename=filename, status=jobs.QUEUED, stage="Queued")
 
 
-async def _enqueue(job_id: str, doc_id: str, filename: str, attempt: int = 0) -> None:
+async def _enqueue(
+    job_id: str, doc_id: str, filename: str, owner: Principal, attempt: int = 0
+) -> None:
     """Queue the work. Job state lives under job_id; arq's own id changes between attempts,
     because arq keeps the key of a finished job and would silently drop a re-run."""
     arq_id = job_id if attempt == 0 else f"{job_id}:{uuid.uuid4().hex[:8]}"
@@ -117,40 +232,47 @@ async def _enqueue(job_id: str, doc_id: str, filename: str, attempt: int = 0) ->
         doc_id,
         filename,
         job_id,
+        asdict(owner),
         _job_id=arq_id,
         _queue_name=SETTINGS.jobs.queue_name,
     )
     if enqueued is None:
-        await _enqueue(job_id, doc_id, filename, attempt + 1)
+        await _enqueue(job_id, doc_id, filename, owner, attempt + 1)
 
 
 @app.get("/jobs/dead-letters")
-async def dead_letters() -> list[dict]:
-    """Poison documents: jobs that failed terminally, newest first."""
-    return await anyio.to_thread.run_sync(jobs.dead_letters)
+async def dead_letters(principal: Principal = Depends(deps.require_admin)) -> list[dict]:
+    """Poison documents in the caller's tenant: jobs that failed terminally, newest first."""
+    return await anyio.to_thread.run_sync(jobs.dead_letters, principal.tenant_id)
 
 
 @app.get("/jobs/{job_id}", response_model=JobOut)
-async def job_status(job_id: str) -> JobOut:
-    state = await anyio.to_thread.run_sync(jobs.get, job_id)
+async def job_status(
+    job_id: str, principal: Principal = Depends(deps.require_viewer)
+) -> JobOut:
+    state = await anyio.to_thread.run_sync(jobs.get, job_id, principal.tenant_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Unknown job.")
     return JobOut(**state)
 
 
 @app.get("/jobs/{job_id}/events")
-async def job_events(job_id: str, request: Request) -> StreamingResponse:
-    return StreamingResponse(_stream_job(job_id, request), media_type="text/event-stream")
+async def job_events(
+    job_id: str, request: Request, principal: Principal = Depends(deps.require_viewer)
+) -> StreamingResponse:
+    return StreamingResponse(
+        _stream_job(job_id, request, principal.tenant_id), media_type="text/event-stream"
+    )
 
 
-async def _stream_job(job_id: str, request: Request) -> AsyncIterator[str]:
+async def _stream_job(job_id: str, request: Request, tenant_id: str) -> AsyncIterator[str]:
     """Poll the job's Redis state and push every change. Ends on terminal state or disconnect."""
     deadline = asyncio.get_running_loop().time() + SETTINGS.jobs.progress_timeout_s
     last: tuple[str, str] = ("", "")
     while True:
         if await request.is_disconnected():
             return
-        state = await anyio.to_thread.run_sync(jobs.get, job_id)
+        state = await anyio.to_thread.run_sync(jobs.get, job_id, tenant_id)
         if state is None:
             yield _sse("error", {"detail": "Unknown job."})
             return
@@ -171,15 +293,28 @@ async def _stream_job(job_id: str, request: Request) -> AsyncIterator[str]:
 
 
 @app.delete("/documents/{doc_id}")
-def delete_document(doc_id: str) -> dict[str, str]:
-    delete(doc_id)
+def delete_document(
+    doc_id: str, principal: Principal = Depends(deps.require_editor)
+) -> dict[str, str]:
+    delete(doc_id, principal)
+    audit.record(principal, "delete", doc_id=doc_id)
     return {"status": "deleted", "doc_id": doc_id}
 
 
 @app.post("/query")
-def query(request: QueryRequest) -> StreamingResponse:
+def query(
+    request: QueryRequest, principal: Principal = Depends(deps.require_viewer)
+) -> StreamingResponse:
     _validate_query(request)
-    return StreamingResponse(_stream_answer(request), media_type="text/event-stream")
+    # Narrowed at the boundary as well as in the retrieval predicates: a doc_id from
+    # another tenant is dropped here and would match nothing even if it were not.
+    doc_ids = scope_doc_ids(request.doc_ids, principal.tenant_id)
+    audit.record(
+        principal, "query", num_docs=len(doc_ids), mode=request.mode, chars=len(request.question)
+    )
+    return StreamingResponse(
+        _stream_answer(request, doc_ids, principal), media_type="text/event-stream"
+    )
 
 
 def _validate_query(request: QueryRequest) -> None:
@@ -199,7 +334,7 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _stream_answer(request: QueryRequest):
+def _stream_answer(request: QueryRequest, doc_ids: list[str], principal: Principal):
     events: "queue.Queue[tuple[str, dict]]" = queue.Queue()
 
     def on_token(text: str) -> None:
@@ -209,12 +344,13 @@ def _stream_answer(request: QueryRequest):
         try:
             answer = answer_question(
                 request.question,
-                request.doc_ids,
+                doc_ids,
                 deps.embedder(),
                 deps.vector_store(),
                 deps.llm_client(),
                 keyword_index=deps.keyword_index(),
                 reranker=deps.reranker(),
+                principal=principal,
                 mode=request.mode,
                 generate=request.generate,
                 on_token=on_token,

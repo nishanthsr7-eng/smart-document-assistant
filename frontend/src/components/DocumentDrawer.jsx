@@ -7,6 +7,7 @@ export default function DocumentDrawer({
   busy,
   onClose,
   onRemove,
+  canRemove,
   onToggleScope,
   onSelectAll,
   onClearScope,
@@ -53,14 +54,16 @@ export default function DocumentDrawer({
                     {entry.filename}
                   </div>
                 </div>
-                <button
-                  className="doc-remove-btn"
-                  onClick={() => onRemove(docId)}
-                  disabled={busy}
-                  title="Remove"
-                >
-                  ×
-                </button>
+                {canRemove && (
+                  <button
+                    className="doc-remove-btn"
+                    onClick={() => onRemove(docId)}
+                    disabled={busy}
+                    title="Remove"
+                  >
+                    ×
+                  </button>
+                )}
               </div>
             ))}
           </div>

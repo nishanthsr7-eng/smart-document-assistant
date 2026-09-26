@@ -16,6 +16,11 @@ from src.generation.client import build_client  # noqa: E402
 from src.ingestion.pipeline import ingest  # noqa: E402
 from src.retrieval.embedder import Embedder  # noqa: E402
 from src.retrieval.keyword_index import KeywordIndex  # noqa: E402
+from sqlalchemy.dialects.postgresql import insert  # noqa: E402
+
+from src.auth.principal import Principal  # noqa: E402
+from src.storage.db import session  # noqa: E402
+from src.storage.models import Tenant  # noqa: E402
 from src.retrieval.reranker import Reranker  # noqa: E402
 from src.retrieval.vector_store import Hit, VectorStore  # noqa: E402
 
@@ -54,10 +59,30 @@ def load_golden_set() -> list[GoldenItem]:
     ]
 
 
+# The eval corpus lives in its own tenant so a run never reads or replaces real documents.
+EVAL_PRINCIPAL = Principal(
+    user_id="00000000-0000-0000-0000-0000000000e1",
+    tenant_id="00000000-0000-0000-0000-0000000000e0",
+    email="eval@localhost",
+    role="admin",
+)
+
+
+def ensure_eval_tenant() -> None:
+    with session() as sess:
+        stmt = (
+            insert(Tenant)
+            .values(tenant_id=EVAL_PRINCIPAL.tenant_id, name="evaluation")
+            .on_conflict_do_nothing(index_elements=[Tenant.tenant_id])
+        )
+        sess.execute(stmt)
+
+
 def ingest_sample_docs(embedder: Embedder) -> list[str]:
+    ensure_eval_tenant()
     doc_ids = []
     for path in sorted(SETTINGS.paths.sample_docs.iterdir()):
-        report = ingest(path.name, path.read_bytes(), embedder)
+        report = ingest(path.name, path.read_bytes(), embedder, EVAL_PRINCIPAL)
         doc_ids.append(report.doc_id)
     return doc_ids
 
@@ -176,7 +201,16 @@ def sweep_abstain_threshold(mode: str) -> list[dict]:
     scored = []
     for item in load_golden_set():
         answer = answer_question(
-            item.question, doc_ids, embedder, store, client, keyword_index, reranker, mode, generate=False
+            item.question,
+            doc_ids,
+            embedder,
+            store,
+            client,
+            keyword_index,
+            reranker,
+            EVAL_PRINCIPAL,
+            mode,
+            generate=False,
         )
         scored.append((item, _top_score(answer)))
 
@@ -251,6 +285,7 @@ def run(mode: str, generate: bool) -> dict:
             client,
             keyword_index,
             reranker,
+            EVAL_PRINCIPAL,
             mode,
             generate=generate,
         )

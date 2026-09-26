@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 
-from sqlalchemy import delete as sa_delete
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
 from src.ingestion.chunker import ChildChunk, build_header
@@ -25,20 +24,17 @@ class Hit:
 
 
 class VectorStore:
-    """pgvector-backed. Stateless handle: all state lives in Postgres, shared by every worker."""
+    """pgvector-backed. Stateless handle: all state lives in Postgres, shared by every worker.
 
-    def has_doc(self, doc_id: str) -> bool:
-        with session() as sess:
-            stmt = select(Chunk.chunk_id).where(
-                Chunk.doc_id == doc_id, Chunk.embedding.isnot(None)
-            ).limit(1)
-            return sess.execute(stmt).first() is not None
+    Every method takes tenant_id and applies it as a predicate. The filter lives here rather
+    than in callers so no call site can forget it: an omitted argument is a type error.
+    """
 
-    def add(self, children: list[ChildChunk], embeddings: list[list[float]]) -> None:
+    def add(self, children: list[ChildChunk], embeddings: list[list[float]], tenant_id: str) -> None:
         if not children:
             return
         rows = [
-            {**_row(child, i), "embedding": embedding}
+            {**_row(child, i, tenant_id), "embedding": embedding}
             for i, (child, embedding) in enumerate(zip(children, embeddings))
         ]
         with session() as sess:
@@ -50,43 +46,38 @@ class VectorStore:
                 )
             )
 
-    def query(self, vector: list[float], k: int, doc_ids: list[str]) -> list[Hit]:
+    def query(self, vector: list[float], k: int, doc_ids: list[str], tenant_id: str) -> list[Hit]:
         if not doc_ids:
             return []
         distance = Chunk.embedding.cosine_distance(vector)
         with session() as sess:
             stmt = (
                 select(Chunk, distance.label("distance"))
-                .where(Chunk.doc_id.in_(doc_ids), Chunk.embedding.isnot(None))
+                .where(
+                    Chunk.tenant_id == tenant_id,
+                    Chunk.doc_id.in_(doc_ids),
+                    Chunk.embedding.isnot(None),
+                )
                 .order_by(distance)
                 .limit(k)
             )
             return [to_hit(chunk, 1.0 - float(dist)) for chunk, dist in sess.execute(stmt)]
 
-    def get_embeddings(self, chunk_ids: list[str]) -> dict[str, list[float]]:
+    def get_embeddings(self, chunk_ids: list[str], tenant_id: str) -> dict[str, list[float]]:
         if not chunk_ids:
             return {}
         with session() as sess:
-            stmt = select(Chunk.chunk_id, Chunk.embedding).where(Chunk.chunk_id.in_(chunk_ids))
+            stmt = select(Chunk.chunk_id, Chunk.embedding).where(
+                Chunk.tenant_id == tenant_id, Chunk.chunk_id.in_(chunk_ids)
+            )
             return {cid: list(vec) for cid, vec in sess.execute(stmt) if vec is not None}
 
-    def delete_doc(self, doc_id: str) -> None:
-        with session() as sess:
-            sess.execute(sa_delete(Chunk).where(Chunk.doc_id == doc_id))
 
-    def clear_embeddings(self, doc_id: str) -> None:
-        with session() as sess:
-            sess.execute(update(Chunk).where(Chunk.doc_id == doc_id).values(embedding=None))
-
-    def all_chunks(self) -> list[Hit]:
-        with session() as sess:
-            return [to_hit(chunk, 0.0) for chunk in sess.scalars(select(Chunk))]
-
-
-def _row(c: ChildChunk, ordinal: int) -> dict:
+def _row(c: ChildChunk, ordinal: int, tenant_id: str) -> dict:
     return {
         "chunk_id": c.chunk_id,
         "doc_id": c.doc_id,
+        "tenant_id": tenant_id,
         "parent_id": c.parent_id,
         "ordinal": ordinal,
         "filename": c.filename,

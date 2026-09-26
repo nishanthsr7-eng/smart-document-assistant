@@ -13,6 +13,47 @@ class QueryRequest(BaseModel):
     history: list[tuple[str, str]] = Field(default_factory=list)
 
 
+class RegisterRequest(BaseModel):
+    tenant_name: str = Field(min_length=2, max_length=128)
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=SETTINGS.auth.min_password_chars, max_length=256)
+
+
+class LoginRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class CreateUserRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=SETTINGS.auth.min_password_chars, max_length=256)
+    role: str = "viewer"
+
+
+class UserOut(BaseModel):
+    user_id: str
+    email: str
+    role: str
+    tenant_id: str
+    tenant_name: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: UserOut
+
+
+class AuditEventOut(BaseModel):
+    event_id: int
+    email: str
+    action: str
+    doc_id: Optional[str]
+    detail: dict[str, Any]
+    created_at: str
+
+
 class SourceOut(BaseModel):
     id: int
     filename: str
@@ -78,6 +119,7 @@ class DocumentOut(BaseModel):
     filename: str
     pages: int
     num_children: int
+    owner_id: str
 
 
 class HealthResponse(BaseModel):

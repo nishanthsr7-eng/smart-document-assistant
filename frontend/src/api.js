@@ -1,16 +1,65 @@
 const BASE = '/api'
+const TOKEN_KEY = 'sda.access_token'
+
+// The access token is the only client-side session state. Every call carries it as a bearer
+// header; the server derives the tenant from the token, never from a request parameter.
+let token = localStorage.getItem(TOKEN_KEY)
+let onUnauthorized = null
+
+export function setToken(value) {
+  token = value
+  if (value) localStorage.setItem(TOKEN_KEY, value)
+  else localStorage.removeItem(TOKEN_KEY)
+}
+
+export function getToken() {
+  return token
+}
+
+export function onSessionExpired(handler) {
+  onUnauthorized = handler
+}
+
+export function authHeaders(extra = {}) {
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : extra
+}
+
+async function failure(res) {
+  let detail = `HTTP ${res.status}`
+  try {
+    detail = (await res.json()).detail || detail
+  } catch {}
+  if (res.status === 401) {
+    setToken(null)
+    onUnauthorized?.()
+  }
+  return new Error(detail)
+}
 
 async function request(path, options = {}) {
-  const res = await fetch(BASE + path, options)
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`
-    try {
-      const body = await res.json()
-      detail = body.detail || detail
-    } catch {}
-    throw new Error(detail)
-  }
+  const res = await fetch(BASE + path, { ...options, headers: authHeaders(options.headers) })
+  if (!res.ok) throw await failure(res)
   return res.json()
+}
+
+export async function register(tenantName, email, password) {
+  return request('/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tenant_name: tenantName, email, password }),
+  })
+}
+
+export async function login(email, password) {
+  return request('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+}
+
+export async function getMe() {
+  return request('/auth/me')
 }
 
 export async function getHealth() {
@@ -30,6 +79,8 @@ export async function uploadDocument(file, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
     xhr.open('POST', BASE + '/ingest')
+    const headers = authHeaders()
+    if (headers.Authorization) xhr.setRequestHeader('Authorization', headers.Authorization)
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) {
         onProgress(Math.round((e.loaded / e.total) * 80))
@@ -58,8 +109,10 @@ export async function uploadDocument(file, onProgress) {
 
 // The upload returns a queued job; indexing progress arrives on this stream.
 export async function streamJobProgress(jobId, { onProgress, onDone } = {}) {
-  const res = await fetch(`${BASE}/jobs/${encodeURIComponent(jobId)}/events`)
-  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+  const res = await fetch(`${BASE}/jobs/${encodeURIComponent(jobId)}/events`, {
+    headers: authHeaders(),
+  })
+  if (!res.ok || !res.body) throw await failure(res)
   await readSse(res, (event, data) => {
     if (event === 'progress') onProgress?.(data.stage)
     else if (event === 'done') onDone?.(data)
@@ -74,16 +127,10 @@ export async function deleteDocument(docId) {
 export async function streamQuery(question, docIds, mode, history, { onToken, onDone } = {}) {
   const res = await fetch(BASE + '/query', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ question, doc_ids: docIds, mode, history }),
   })
-  if (!res.ok || !res.body) {
-    let detail = `HTTP ${res.status}`
-    try {
-      detail = (await res.json()).detail || detail
-    } catch {}
-    throw new Error(detail)
-  }
+  if (!res.ok || !res.body) throw await failure(res)
 
   await readSse(res, (event, data) => {
     if (event === 'token') onToken?.(data.text)

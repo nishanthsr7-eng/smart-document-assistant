@@ -60,6 +60,25 @@ class JobsConfig:
 
 
 @dataclass(frozen=True)
+class AuthConfig:
+    """Local OIDC-shaped JWT auth. Self-contained on purpose: an external IdP would be the
+    production choice, but the claims and the enforcement points are the same either way."""
+
+    jwt_secret: str = _require("JWT_SECRET")
+    jwt_algorithm: str = "HS256"
+    jwt_issuer: str = "smart-document-assistant"
+    access_token_ttl_s: int = int(os.environ.get("ACCESS_TOKEN_TTL_S", "43200"))
+    # scrypt work factors: N=2**15 costs ~60ms per hash on a laptop core.
+    scrypt_n: int = 2**15
+    scrypt_r: int = 8
+    scrypt_p: int = 1
+    scrypt_salt_bytes: int = 16
+    min_password_chars: int = 10
+    roles: tuple[str, ...] = ("viewer", "editor", "admin")
+    audit_page_size: int = 100
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     embedder_name: str = "BAAI/bge-base-en-v1.5"
     embedder_query_prefix: str = "Represent this sentence for searching relevant passages: "
@@ -136,6 +155,7 @@ class Settings:
     paths: Paths
     storage: StorageConfig
     jobs: JobsConfig
+    auth: AuthConfig
     models: ModelConfig
     ingestion: IngestionConfig
     retrieval: RetrievalConfig
@@ -157,6 +177,7 @@ def _build_settings() -> Settings:
         paths=Paths(),
         storage=StorageConfig(),
         jobs=JobsConfig(),
+        auth=AuthConfig(),
         models=models,
         ingestion=ingestion,
         retrieval=RetrievalConfig(),

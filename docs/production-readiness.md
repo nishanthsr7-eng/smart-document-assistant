@@ -78,7 +78,7 @@ job is terminal and waits in the DLQ).
 kills the process before validation runs. Stream to a temp file with a hard byte cap, plus
 `client_max_body_size` at the proxy.
 
-### 5. No identity, no tenancy — documents are a global namespace
+### 5. No identity, no tenancy — documents are a global namespace — **DONE**
 `doc_id = sha256(content)` is global, and `_find_by_filename` (`src/ingestion/pipeline.py:155`) will
 **replace another user's document** because it shares a filename. `DELETE /documents/{doc_id}`
 accepts any id from anyone.
@@ -88,6 +88,34 @@ every chunk's metadata with the filter injected in the retrieval layer, not by c
 `doc_id = hash(tenant_id, content)`; RBAC (viewer/editor/admin); audit log of upload/query/delete.
 Add a test that a query scoped to tenant A can never surface a tenant B chunk — that is the one test
 auditors ask for.
+
+**Done, with local JWT auth.** `src/auth/` holds the principal, scrypt password hashing, HS256
+token issue/verify, the registration and user service, and the audit log. Registration creates a
+tenant with its first user as admin; that admin adds the rest, and the tenant is never a request
+parameter. Roles are ordered `viewer < editor < admin`: viewers read and ask, editors upload and
+delete, admins manage users and read the audit log. `tenants`, `users` and `audit_log` are new
+tables; `documents` gained `tenant_id` + `owner_id` and `chunks` a denormalized `tenant_id`.
+
+`doc_id` is now `sha256(tenant_id || content)`, which kills the replace-by-filename bug at the
+root: two tenants uploading the same file get two documents, and no tenant can name another's
+document by hashing a file it already holds. The tenant filter is a predicate inside
+`VectorStore` and `KeywordIndex` rather than something callers pass through — every method takes
+`tenant_id`, so omitting it is a type error, not a silent leak. The router additionally narrows
+caller-supplied `doc_ids` with `scope_doc_ids`, dropping foreign ids rather than 404ing on them,
+since a 404 would reveal that the id exists somewhere. The answer cache key gained `tenant_id`;
+without it two tenants asking the same question of same-named documents shared one answer. Job
+state and the dead-letter list are tenant-checked on read.
+
+`tests/test_tenancy.py` is the isolation suite (13 tests): both documents embed to the *same*
+vector and share a filename, so only the tenant predicate separates them. It asserts dense and
+lexical retrieval scoped to A never return a chunk of B even when B's `doc_id` is passed in
+explicitly, that delete and job reads across tenants are 404s, and that the cache key differs.
+`tests/test_auth.py` covers hashing, token forgery and expiry, role ranking, and the audit log.
+Verified end to end against a running API and worker: 35 checks, including that tenant A's
+answer contains its own figure and never B's while naming both documents in the request.
+
+Not done: an external IdP (this is a local HS256 issuer, not OIDC/Keycloak), refresh tokens and
+revocation, token rotation, and per-tenant rate limits (item 11).
 
 ### 6. No container, no CI, no deploy artifact
 No Dockerfile, no compose, no pipeline. Model weights (~1.5 GB across bge + mxbai + BLIP) download
@@ -288,7 +316,7 @@ streams, 12-factor compliance throughout.
 1. ~~**Postgres + S3 + Redis** — kill process-local state (unblocks everything)~~ **done**
 2. ~~**pgvector or Qdrant** — retire embedded Chroma and in-memory BM25~~ **done** (pgvector)
 3. ~~**Async ingest workers** — get parsing off the request path~~ **done** (arq)
-4. **Auth + tenancy** — with the cross-tenant isolation test
+4. ~~**Auth + tenancy** — with the cross-tenant isolation test~~ **done** (local JWT)
 5. **Docker + CI + Helm** — reproducible deploys
 6. **OpenTelemetry + Prometheus + Langfuse** — so it can be seen
 7. **Eval gating in CI** — so quality cannot silently regress

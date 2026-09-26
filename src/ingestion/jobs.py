@@ -4,6 +4,7 @@ from typing import Any, Optional, cast
 
 from arq.connections import ArqRedis, RedisSettings, create_pool
 
+from src.auth.principal import Principal
 from src.core.config import SETTINGS
 from src.storage.redis_client import client
 
@@ -68,9 +69,20 @@ def _write(job_id: str, /, **fields: Any) -> None:
     conn.expire(key, SETTINGS.jobs.state_ttl_s)
 
 
-def record_queued(job_id: str, doc_id: str, filename: str) -> None:
+def record_queued(job_id: str, doc_id: str, filename: str, owner: Principal) -> None:
     client().delete(_key(job_id))  # a re-upload reuses the key; the old attempt's report must go
-    _write(job_id, job_id=job_id, doc_id=doc_id, filename=filename, status=QUEUED, stage="Queued")
+    _write(
+        job_id,
+        job_id=job_id,
+        doc_id=doc_id,
+        filename=filename,
+        # Stored on the job so job status and progress can be tenant-checked without
+        # a document row: a queued job has none yet.
+        tenant_id=owner.tenant_id,
+        owner_id=owner.user_id,
+        status=QUEUED,
+        stage="Queued",
+    )
 
 
 def record_stage(job_id: str, stage: str) -> None:
@@ -82,7 +94,9 @@ def record_done(job_id: str, doc_id: str, report: dict) -> None:
     release(doc_id)
 
 
-def record_failed(job_id: str, doc_id: str, filename: str, error: str) -> None:
+def record_failed(
+    job_id: str, doc_id: str, filename: str, error: str, tenant_id: str
+) -> None:
     _write(job_id, status=FAILED, stage="Failed", error=error)
     release(doc_id)
     conn = client()
@@ -93,6 +107,7 @@ def record_failed(job_id: str, doc_id: str, filename: str, error: str) -> None:
                 "job_id": job_id,
                 "doc_id": doc_id,
                 "filename": filename,
+                "tenant_id": tenant_id,
                 "error": error,
                 "failed_at": time.time(),
             }
@@ -101,16 +116,21 @@ def record_failed(job_id: str, doc_id: str, filename: str, error: str) -> None:
     conn.ltrim(SETTINGS.jobs.dlq_key, 0, SETTINGS.jobs.dlq_max_len - 1)
 
 
-def get(job_id: str) -> Optional[dict]:
+def get(job_id: str, tenant_id: Optional[str] = None) -> Optional[dict]:
+    """Read job state. With a tenant_id, another tenant's job reads as if it did not exist."""
     raw = cast(dict[bytes, bytes], client().hgetall(_key(job_id)))
     if not raw:
         return None
     state = {k.decode(): v.decode() for k, v in raw.items()}
+    if tenant_id is not None and state.get("tenant_id") != tenant_id:
+        return None
     if "report" in state:
         state["report"] = json.loads(state["report"])
     return state
 
 
-def dead_letters(limit: int = 50) -> list[dict]:
-    items = cast(list[bytes], client().lrange(SETTINGS.jobs.dlq_key, 0, limit - 1))
-    return [json.loads(item) for item in items]
+def dead_letters(tenant_id: str, limit: int = 50) -> list[dict]:
+    """Poison documents for one tenant. The list is shared, so it is filtered on read."""
+    items = cast(list[bytes], client().lrange(SETTINGS.jobs.dlq_key, 0, -1))
+    entries = [json.loads(item) for item in items]
+    return [e for e in entries if e.get("tenant_id") == tenant_id][:limit]

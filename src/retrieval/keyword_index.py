@@ -23,9 +23,10 @@ class KeywordIndex:
     Replaces the in-process BM25 corpus: the index is a GIN-backed generated column on `chunks`,
     so it is maintained by the same write that stores the chunk and is identical in every worker.
     Ranking is ts_rank_cd rather than BM25 — fusion is rank-based, so the scale does not matter.
+    The tenant predicate is applied here, alongside the dense one, for the same reason.
     """
 
-    def query(self, question: str, k: int, doc_ids: list[str]) -> list[Hit]:
+    def query(self, question: str, k: int, doc_ids: list[str], tenant_id: str) -> list[Hit]:
         terms = tokenize(question)
         if not doc_ids or not terms:
             return []
@@ -34,7 +35,12 @@ class KeywordIndex:
         with session() as sess:
             stmt = (
                 select(Chunk, rank.label("rank"))
-                .where(Chunk.doc_id.in_(doc_ids), Chunk.tsv.op("@@")(tsquery), rank > 0)
+                .where(
+                    Chunk.tenant_id == tenant_id,
+                    Chunk.doc_id.in_(doc_ids),
+                    Chunk.tsv.op("@@")(tsquery),
+                    rank > 0,
+                )
                 .order_by(rank.desc())
                 .limit(k)
             )

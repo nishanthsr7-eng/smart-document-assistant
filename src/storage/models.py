@@ -1,7 +1,9 @@
 from datetime import datetime
+from typing import Optional
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    BigInteger,
     Computed,
     DateTime,
     ForeignKey,
@@ -21,10 +23,59 @@ class Base(DeclarativeBase):
     pass
 
 
+class Tenant(Base):
+    __tablename__ = "tenants"
+
+    tenant_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
+    )
+    # Email is globally unique: a login carries no tenant, so it must identify one user.
+    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (Index("ix_users_tenant_id", "tenant_id"),)
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_log"
+
+    event_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    doc_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    detail: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (Index("ix_audit_log_tenant_created", "tenant_id", "created_at"),)
+
+
 class Document(Base):
     __tablename__ = "documents"
 
     doc_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenants.tenant_id", ondelete="CASCADE"), nullable=False
+    )
+    owner_id: Mapped[str] = mapped_column(String(36), nullable=False)
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     ingest_version: Mapped[str] = mapped_column(String(32), nullable=False)
     pages: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -37,7 +88,7 @@ class Document(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    __table_args__ = (Index("ix_documents_filename", "filename"),)
+    __table_args__ = (Index("ix_documents_tenant_filename", "tenant_id", "filename"),)
 
 
 class Chunk(Base):
@@ -47,6 +98,8 @@ class Chunk(Base):
     doc_id: Mapped[str] = mapped_column(
         String(64), ForeignKey("documents.doc_id", ondelete="CASCADE"), nullable=False
     )
+    # Denormalized from documents so the retrieval filter is a predicate, not a join.
+    tenant_id: Mapped[str] = mapped_column(String(36), nullable=False)
     parent_id: Mapped[str] = mapped_column(String(128), nullable=False)
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
@@ -70,6 +123,7 @@ class Chunk(Base):
 
     __table_args__ = (
         Index("ix_chunks_doc_id", "doc_id"),
+        Index("ix_chunks_tenant_id", "tenant_id"),
         Index("ix_chunks_tsv", "tsv", postgresql_using="gin"),
         Index(
             "ix_chunks_embedding",

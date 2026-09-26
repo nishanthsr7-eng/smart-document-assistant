@@ -30,6 +30,7 @@ const Composer = forwardRef(function Composer({
   onModeChange,
   onSubmit,
   onUpload,
+  canUpload,
   onToggleScope,
 }, ref) {
   const [text, setText] = useState('')
@@ -112,24 +113,28 @@ const Composer = forwardRef(function Composer({
 
           <div className="composer-row">
             <div className="composer-left">
-              <button
-                id="attach-btn"
-                className="pill-btn"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={busy}
-                title="Upload documents"
-              >
-                <AttachIcon />
-                Attach
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,.txt"
-                multiple
-                onChange={handleFilePick}
-                style={{ display: 'none' }}
-              />
+              {canUpload && (
+                <>
+                  <button
+                    id="attach-btn"
+                    className="pill-btn"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={busy}
+                    title="Upload documents"
+                  >
+                    <AttachIcon />
+                    Attach
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.txt"
+                    multiple
+                    onChange={handleFilePick}
+                    style={{ display: 'none' }}
+                  />
+                </>
+              )}
               <ModeSelector
                 ref={modeSelectorRef}
                 modes={modes}

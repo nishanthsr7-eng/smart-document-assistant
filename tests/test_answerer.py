@@ -7,6 +7,7 @@ from src.ingestion.chunker import ParentChunk
 from src.retrieval.vector_store import Hit
 
 BUDGET = SETTINGS.retrieval.context_token_budget
+TENANT = "00000000-0000-0000-0000-0000000000aa"
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ class _FakeEmbedder:
     def encode(self, texts: list[str]) -> list[list[float]]:
         return [[float(len(t) % 5), 1.0] for t in texts]
 
-    def get_embeddings(self, chunk_ids: list[str]) -> dict[str, list[float]]:
+    def get_embeddings(self, chunk_ids: list[str], tenant_id: str) -> dict[str, list[float]]:
         return {cid: [0.1, 0.2] for cid in chunk_ids}
 
 
@@ -64,7 +65,7 @@ def test_huge_single_source_is_truncated_to_budget(stub_parents):
     doc_id = "doc1"
     huge_text = _FILLER * (BUDGET * 2)
     _write_parents(stub_parents, doc_id, [("p1", huge_text)])
-    sources, _, _ = answerer._assemble_sources([_hit("p1", doc_id, 0.9)], [doc_id], _FakeEmbedder())
+    sources, _, _ = answerer._assemble_sources([_hit("p1", doc_id, 0.9)], _FakeEmbedder(), TENANT)
     assert count_tokens(sources[0].text) <= BUDGET
 
 
@@ -75,7 +76,9 @@ def test_truncated_source_keeps_matched_span_in_bounds(stub_parents):
     huge_text = prefix + marker + _FILLER * BUDGET
     span = (len(prefix), len(prefix) + len(marker))
     _write_parents(stub_parents, doc_id, [("p1", huge_text)])
-    sources, _, _ = answerer._assemble_sources([_hit("p1", doc_id, 0.9, span=span)], [doc_id], _FakeEmbedder())
+    sources, _, _ = answerer._assemble_sources(
+        [_hit("p1", doc_id, 0.9, span=span)], _FakeEmbedder(), TENANT
+    )
     source = sources[0]
     start, end = source.char_span_in_parent
     assert 0 <= start <= end <= len(source.text)
@@ -100,6 +103,6 @@ def test_multiple_sources_never_exceed_budget(stub_parents):
     parents = [(f"p{i}", chunk) for i in range(5)]
     _write_parents(stub_parents, doc_id, parents)
     hits = [_hit(pid, doc_id, 1.0 - i * 0.01) for i, (pid, _) in enumerate(parents)]
-    sources, _, _ = answerer._assemble_sources(hits, [doc_id], _FakeEmbedder())
+    sources, _, _ = answerer._assemble_sources(hits, _FakeEmbedder(), TENANT)
     total_tokens = sum(count_tokens(s.text) for s in sources)
     assert total_tokens <= BUDGET

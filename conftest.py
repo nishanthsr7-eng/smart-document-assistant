@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,6 +41,17 @@ def storage_stack():
 
 
 @pytest.fixture
+def tenants(clean_state):
+    """Two registered tenants. The isolation tests run every assertion across this pair."""
+    from src.auth import service
+
+    return SimpleNamespace(
+        a=service.register_tenant("Acme", "admin@acme.test", "acme-password-1"),
+        b=service.register_tenant("Globex", "admin@globex.test", "globex-password-1"),
+    )
+
+
+@pytest.fixture
 def clean_state(storage_stack):
     _reset()
     yield
@@ -51,9 +63,12 @@ def _reset() -> None:
 
     from src.core.cache import ANSWER_CACHE, DOC_CACHE
     from src.storage.db import session
-    from src.storage.models import Document
+    from src.storage.models import AuditEvent, Document, Tenant
 
     with session() as sess:
+        # Tenants cascade to users and documents, and documents cascade to chunks.
         sess.execute(delete(Document))
+        sess.execute(delete(Tenant))
+        sess.execute(delete(AuditEvent))
     ANSWER_CACHE.clear()
     DOC_CACHE.clear()
