@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.core.config import SETTINGS  # noqa: E402
 from src.generation.answerer import Answer, answer_question  # noqa: E402
 from src.generation.client import build_client  # noqa: E402
-from src.ingestion.pipeline import ingest, load_children  # noqa: E402
+from src.ingestion.pipeline import ingest  # noqa: E402
 from src.retrieval.embedder import Embedder  # noqa: E402
 from src.retrieval.keyword_index import KeywordIndex  # noqa: E402
 from src.retrieval.reranker import Reranker  # noqa: E402
@@ -54,15 +54,11 @@ def load_golden_set() -> list[GoldenItem]:
     ]
 
 
-def ingest_sample_docs(embedder: Embedder, store: VectorStore) -> list[str]:
+def ingest_sample_docs(embedder: Embedder) -> list[str]:
     doc_ids = []
     for path in sorted(SETTINGS.paths.sample_docs.iterdir()):
-        report = ingest(path.name, path.read_bytes())
+        report = ingest(path.name, path.read_bytes(), embedder)
         doc_ids.append(report.doc_id)
-        if not store.has_doc(report.doc_id):
-            children = load_children(report.doc_id)
-            embeddings = embedder.encode([c.embed_text for c in children])
-            store.add(children, embeddings)
     return doc_ids
 
 
@@ -173,8 +169,8 @@ def sweep_abstain_threshold(mode: str) -> list[dict]:
     embedder = Embedder()
     store = VectorStore()
     client = build_client()
-    doc_ids = ingest_sample_docs(embedder, store)
-    keyword_index = KeywordIndex(store) if mode != "dense" else None
+    doc_ids = ingest_sample_docs(embedder)
+    keyword_index = KeywordIndex() if mode != "dense" else None
     reranker = Reranker()
 
     scored = []
@@ -230,8 +226,8 @@ def run(mode: str, generate: bool) -> dict:
     embedder = Embedder()
     store = VectorStore()
     client = build_client()
-    doc_ids = ingest_sample_docs(embedder, store)
-    keyword_index = KeywordIndex(store) if mode != "dense" else None
+    doc_ids = ingest_sample_docs(embedder)
+    keyword_index = KeywordIndex() if mode != "dense" else None
     reranker = Reranker()
 
     items = load_golden_set()

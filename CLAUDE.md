@@ -3,7 +3,7 @@
 RAG app: PDF/TXT → chunk → embed → ChromaDB → retrieve → LLM answers with citations + confidence. Embeddings/reranking/vector store run locally; generation defaults to a free-tier cloud API (Gemini), with Ollama as an offline fallback.
 Take-home assignment. Working and explainable beats clever.
 
-**Stack:** Python 3.10 (`.venv/`) · FastAPI · React + Vite · Gemini/Groq/Ollama (`qwen3:8b`) · `sentence-transformers` (`BAAI/bge-base-en-v1.5`) · `mixedbread-ai/mxbai-rerank-base-v1` · ChromaDB · `docling` + BLIP
+**Stack:** Python 3.10 (`.venv/`) · FastAPI · React + Vite · Postgres/pgvector · Redis · MinIO · Gemini/Groq/Ollama (`qwen3:8b`) · `sentence-transformers` (`BAAI/bge-base-en-v1.5`) · `mixedbread-ai/mxbai-rerank-base-v1` · `docling` + BLIP
 **Plan of record:** `WORKFLOW.md` — follow stages in order; update "Notes / tweaks log" on deviations.
 
 ## Directory layout (fixed)
@@ -18,7 +18,9 @@ src/          Backend business logic & FastAPI REST API
   retrieval/  embedder.py, vector_store.py, keyword_index.py, hybrid.py, reranker.py
   generation/ client.py, prompts.py, answerer.py
   trust/      abstention.py, citations.py, confidence.py
-evaluation/  data/sample_docs/  data/chroma/ (gitignored)  docs/  tests/
+  storage/    db.py, models.py, objects.py, redis_client.py
+migrations/   Alembic revisions
+evaluation/  data/sample_docs/  docs/  tests/
 ```
 - `frontend/` communicates with `src/api/` via HTTP REST endpoints.
 - No `utils.py`, `helpers.py`, `misc/`. One module = one responsibility.
@@ -43,7 +45,8 @@ Finish/revert current edit, write `docs/handoff.md` (terse bullets: done, pendin
 - Type hints on all signatures. Constants in `src/core/config.py`. Fail loudly on real errors.
 
 ## Dev server
-FastAPI backend on port 8000: `uvicorn src.api.router:app --host 127.0.0.1 --port 8000`
+Shared state first: `docker compose up -d` then `alembic upgrade head` (Postgres 5433, Redis 6380, MinIO 9002). No local-disk fallback: the API will not start without them.
+FastAPI backend on port 8000: `uvicorn src.api.router:app --host 127.0.0.1 --port 8000 --workers 4`
 React frontend on port 5173: `cd frontend && npm run dev`
 
 ## Security & Git

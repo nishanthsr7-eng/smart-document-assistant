@@ -16,30 +16,10 @@ def client():
 
 
 class _FakeVectorStore:
-    def __init__(self):
-        self.added = []
-        self.deleted = []
+    """Only the query path reaches the store from the router; ingest owns its own writes."""
 
-    def has_doc(self, doc_id):
-        return False
-
-    def add(self, children, embeddings):
-        self.added.append((children, embeddings))
-
-    def delete_doc(self, doc_id):
-        self.deleted.append(doc_id)
-
-
-class _FakeKeywordIndex:
-    def __init__(self):
-        self.added = []
-        self.removed = []
-
-    def add_doc(self, children):
-        self.added.append(children)
-
-    def remove_doc(self, doc_id):
-        self.removed.append(doc_id)
+    def query(self, vector, k, doc_ids):
+        return []
 
 
 class _FakeEmbedder:
@@ -50,12 +30,10 @@ class _FakeEmbedder:
 @pytest.fixture
 def fake_infra(monkeypatch):
     store = _FakeVectorStore()
-    index = _FakeKeywordIndex()
     monkeypatch.setattr(deps, "vector_store", lambda: store)
-    monkeypatch.setattr(deps, "keyword_index", lambda: index)
     monkeypatch.setattr(deps, "embedder", lambda: _FakeEmbedder())
     monkeypatch.setattr(deps, "figure_captioner", lambda: None)
-    return SimpleNamespace(store=store, index=index)
+    return SimpleNamespace(store=store)
 
 
 # --- POST /ingest ---
@@ -71,8 +49,7 @@ def test_ingest_happy_path(client, fake_infra, monkeypatch):
         num_children=4,
         outcome="indexed",
     )
-    monkeypatch.setattr(router, "ingest", lambda filename, data, captioner=None: report)
-    monkeypatch.setattr(router, "load_children", lambda doc_id: [])
+    monkeypatch.setattr(router, "ingest", lambda filename, data, embedder, captioner=None: report)
 
     resp = client.post("/ingest", files={"file": ("policy.pdf", PDF_BYTES, "application/pdf")})
 
@@ -81,11 +58,9 @@ def test_ingest_happy_path(client, fake_infra, monkeypatch):
     assert body["doc_id"] == "abc123"
     assert body["outcome"] == "indexed"
     assert body["num_children"] == 4
-    assert fake_infra.store.added
-    assert fake_infra.index.added
 
 
-def test_ingest_purges_superseded_doc(client, fake_infra, monkeypatch):
+def test_ingest_replaces_superseded_doc(client, fake_infra, monkeypatch):
     report = IngestReport(
         doc_id="new1",
         filename="policy.pdf",
@@ -96,14 +71,14 @@ def test_ingest_purges_superseded_doc(client, fake_infra, monkeypatch):
         outcome="replaced",
         replaced_doc_id="old1",
     )
-    monkeypatch.setattr(router, "ingest", lambda filename, data, captioner=None: report)
-    monkeypatch.setattr(router, "load_children", lambda doc_id: [])
+    monkeypatch.setattr(router, "ingest", lambda filename, data, embedder, captioner=None: report)
 
     resp = client.post("/ingest", files={"file": ("policy.pdf", PDF_BYTES, "application/pdf")})
 
     assert resp.status_code == 200
-    assert fake_infra.store.deleted == ["old1"]
-    assert fake_infra.index.removed == ["old1"]
+    # The superseded doc's rows are removed inside ingest, under the cross-worker ingest lock.
+    assert resp.json()["outcome"] == "replaced"
+    assert resp.json()["doc_id"] == "new1"
 
 
 def test_ingest_rejects_oversize_file(client):
@@ -169,5 +144,3 @@ def test_documents_list_and_delete_round_trip(client, fake_infra, monkeypatch):
     delete_resp = client.delete("/documents/d1")
     assert delete_resp.status_code == 200
     assert delete_resp.json() == {"status": "deleted", "doc_id": "d1"}
-    assert fake_infra.store.deleted == ["d1"]
-    assert fake_infra.index.removed == ["d1"]

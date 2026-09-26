@@ -25,7 +25,7 @@ def vector_store() -> VectorStore:
 
 @lru_cache(maxsize=1)
 def keyword_index() -> KeywordIndex:
-    return KeywordIndex(vector_store())
+    return KeywordIndex()
 
 
 @lru_cache(maxsize=1)

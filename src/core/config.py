@@ -5,19 +5,43 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from src.core.errors import ConfigError
+
 load_dotenv()
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+
+
+def _require(name: str) -> str:
+    value = os.environ.get(name, "")
+    if not value:
+        raise ConfigError(f"{name} is required. See .env.example and docker-compose.yml.")
+    return value
 
 
 @dataclass(frozen=True)
 class Paths:
     root: Path = ROOT_DIR
     data: Path = ROOT_DIR / "data"
-    chroma: Path = ROOT_DIR / "data" / "chroma"
     models: Path = ROOT_DIR / "data" / "models"
-    parents: Path = ROOT_DIR / "data" / "parents"
     sample_docs: Path = ROOT_DIR / "data" / "sample_docs"
+
+
+@dataclass(frozen=True)
+class StorageConfig:
+    """Shared-state backends. All required: the service has no process-local fallback."""
+
+    database_url: str = _require("DATABASE_URL")
+    redis_url: str = _require("REDIS_URL")
+    s3_endpoint: str = _require("S3_ENDPOINT")
+    s3_bucket: str = _require("S3_BUCKET")
+    s3_access_key: str = _require("S3_ACCESS_KEY")
+    s3_secret_key: str = _require("S3_SECRET_KEY")
+    s3_region: str = os.environ.get("S3_REGION", "us-east-1")
+    embedding_dim: int = 768
+    pool_size: int = int(os.environ.get("DB_POOL_SIZE", "5"))
+    pool_max_overflow: int = int(os.environ.get("DB_POOL_MAX_OVERFLOW", "10"))
+    ingest_lock_ttl_s: int = 900
 
 
 @dataclass(frozen=True)
@@ -45,7 +69,6 @@ class IngestionConfig:
     max_upload_mb: int = 20
     max_pages: int = 200
     min_chars_per_page: int = 40
-    parent_cache_size: int = 32
 
 
 @dataclass(frozen=True)
@@ -91,12 +114,12 @@ class GenerationConfig:
     keep_alive: str = "30m"
     history_turns: int = 6
     cache_ttl_s: int = 3600
-    cache_size: int = 128
 
 
 @dataclass(frozen=True)
 class Settings:
     paths: Paths
+    storage: StorageConfig
     models: ModelConfig
     ingestion: IngestionConfig
     retrieval: RetrievalConfig
@@ -116,6 +139,7 @@ def _build_settings() -> Settings:
     models = ModelConfig()
     return Settings(
         paths=Paths(),
+        storage=StorageConfig(),
         models=models,
         ingestion=ingestion,
         retrieval=RetrievalConfig(),

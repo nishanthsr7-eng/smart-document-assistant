@@ -1,67 +1,112 @@
-from types import SimpleNamespace
+import concurrent.futures
 
 import pytest
+from sqlalchemy import func, select
 
+from src.core.cache import ANSWER_CACHE
 from src.core.config import SETTINGS
 from src.ingestion import pipeline
-
-
-@pytest.fixture
-def isolated_store(tmp_path, monkeypatch):
-    store = tmp_path / "parents"
-    paths = SimpleNamespace(parents=store)
-    monkeypatch.setattr(pipeline, "SETTINGS", SimpleNamespace(paths=paths, ingest_version=SETTINGS.ingest_version))
-    monkeypatch.setattr(pipeline, "_MANIFEST", store / "manifest.json")
-    return store
-
+from src.storage import objects
+from src.storage.db import session
+from src.storage.models import Chunk, Document
 
 DOC = b"1 Policy\n\nEmployees accrue leave each pay period. Sick leave is separate.\n\n- rule one\n- rule two"
 
+pytestmark = pytest.mark.usefixtures("clean_state")
 
-def test_first_ingest_indexes(isolated_store):
-    report = pipeline.ingest("policy.txt", DOC)
+DIM = SETTINGS.storage.embedding_dim
+
+
+class _FakeEmbedder:
+    def encode(self, texts: list[str]) -> list[list[float]]:
+        return [[(len(t) % 7) / 7.0] * DIM for t in texts]
+
+
+def _ingest_live(filename: str, data: bytes) -> pipeline.IngestReport:
+    return pipeline.ingest(filename, data, _FakeEmbedder())
+
+
+def test_first_ingest_indexes(clean_state):
+    report = _ingest_live("policy.txt", DOC)
     assert report.outcome == "indexed"
     assert report.num_children >= 1
-    assert (isolated_store / f"{report.doc_id}.json").exists()
+    assert objects.get_parents(report.doc_id)
+    with session() as sess:
+        assert sess.scalar(select(func.count()).select_from(Chunk)) == report.num_children
 
 
-def test_reingest_same_bytes_is_duplicate(isolated_store):
-    first = pipeline.ingest("policy.txt", DOC)
-    second = pipeline.ingest("policy.txt", DOC)
+def test_reingest_same_bytes_is_duplicate(clean_state):
+    first = _ingest_live("policy.txt", DOC)
+    second = pipeline.ingest("policy.txt", DOC, _FakeEmbedder())
     assert second.outcome == "duplicate"
     assert second.doc_id == first.doc_id
     assert second.num_children == first.num_children
 
 
-def test_same_filename_new_content_replaces(isolated_store):
-    first = pipeline.ingest("policy.txt", DOC)
-    report = pipeline.ingest("policy.txt", DOC + b"\n\nExtra clause added here.")
+def test_same_filename_new_content_replaces(clean_state):
+    first = _ingest_live("policy.txt", DOC)
+    report = _ingest_live("policy.txt", DOC + b"\n\nExtra clause added here.")
     assert report.outcome == "replaced"
     assert report.replaced_doc_id == first.doc_id
-    manifest = pipeline._load_manifest()
-    assert len(manifest) == 1
-    assert not (isolated_store / f"{first.doc_id}.json").exists()
+    with session() as sess:
+        assert sess.scalar(select(func.count()).select_from(Document)) == 1
+        assert sess.scalar(
+            select(func.count()).select_from(Chunk).where(Chunk.doc_id == first.doc_id)
+        ) == 0
 
 
-def test_list_indexed_reflects_manifest(isolated_store):
-    report = pipeline.ingest("policy.txt", DOC)
+def test_ingest_stores_embeddings_and_lists_the_document(clean_state):
+    report = _ingest_live("policy.txt", DOC)
+    assert [e["doc_id"] for e in pipeline.list_indexed()] == [report.doc_id]
+    with session() as sess:
+        missing = sess.scalar(
+            select(func.count()).select_from(Chunk).where(Chunk.embedding.is_(None))
+        )
+    assert missing == 0
+
+
+def test_list_indexed_reflects_documents(clean_state):
+    report = _ingest_live("policy.txt", DOC)
     entries = {e["doc_id"]: e for e in pipeline.list_indexed()}
     assert entries[report.doc_id]["filename"] == "policy.txt"
     assert entries[report.doc_id]["num_children"] == report.num_children
 
 
-def test_delete_removes_from_manifest_and_disk(isolated_store):
-    report = pipeline.ingest("policy.txt", DOC)
+def test_delete_removes_rows_and_blobs(clean_state):
+    report = _ingest_live("policy.txt", DOC)
     pipeline.delete(report.doc_id)
-    assert report.doc_id not in pipeline._load_manifest()
-    assert not (isolated_store / f"{report.doc_id}.json").exists()
+    assert pipeline.list_indexed() == []
+    with session() as sess:
+        assert sess.scalar(select(func.count()).select_from(Chunk)) == 0
 
 
-def test_roundtrip_parents_and_children(isolated_store):
-    report = pipeline.ingest("policy.txt", DOC)
+def test_roundtrip_parents_and_children(clean_state):
+    report = _ingest_live("policy.txt", DOC)
     parents = pipeline.load_parents(report.doc_id)
     children = pipeline.load_children(report.doc_id)
     assert len(parents) == report.num_parents
     assert len(children) == report.num_children
     assert all(isinstance(c.section_path, tuple) for c in children)
     assert all(isinstance(c.char_span_in_parent, tuple) for c in children)
+
+
+def test_ingest_invalidates_the_shared_answer_cache(clean_state):
+    ANSWER_CACHE.set("k", {"answer": "stale"})
+    _ingest_live("policy.txt", DOC)
+    assert ANSWER_CACHE.get("k") is None
+
+
+def test_concurrent_uploads_of_one_filename_keep_a_single_document(clean_state):
+    """The old manifest was a read-modify-write with no lock; this raced and lost entries."""
+    bodies = [DOC + f"\n\nVariant {i}.".encode() for i in range(4)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        reports = list(pool.map(lambda b: _ingest_live("policy.txt", b), bodies))
+
+    with session() as sess:
+        docs = list(sess.scalars(select(Document)))
+        assert len(docs) == 1
+        assert docs[0].doc_id in {r.doc_id for r in reports}
+        orphans = sess.scalar(
+            select(func.count()).select_from(Chunk).where(Chunk.doc_id != docs[0].doc_id)
+        )
+        assert orphans == 0

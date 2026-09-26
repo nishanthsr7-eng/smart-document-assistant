@@ -1,12 +1,12 @@
-import json
 from dataclasses import dataclass
 
-import chromadb
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
 
-from src.core.config import SETTINGS
-from src.ingestion.chunker import ChildChunk
-
-_COLLECTION = "chunks"
+from src.ingestion.chunker import ChildChunk, build_header
+from src.storage.db import session
+from src.storage.models import Chunk
 
 
 @dataclass
@@ -25,76 +25,94 @@ class Hit:
 
 
 class VectorStore:
-    def __init__(self) -> None:
-        client = chromadb.PersistentClient(path=str(SETTINGS.paths.chroma))
-        self._collection = client.get_or_create_collection(
-            _COLLECTION, metadata={"hnsw:space": "cosine"}
-        )
+    """pgvector-backed. Stateless handle: all state lives in Postgres, shared by every worker."""
 
     def has_doc(self, doc_id: str) -> bool:
-        return bool(self._collection.get(where={"doc_id": doc_id}, limit=1)["ids"])
+        with session() as sess:
+            stmt = select(Chunk.chunk_id).where(
+                Chunk.doc_id == doc_id, Chunk.embedding.isnot(None)
+            ).limit(1)
+            return sess.execute(stmt).first() is not None
 
     def add(self, children: list[ChildChunk], embeddings: list[list[float]]) -> None:
-        self._collection.add(
-            ids=[c.chunk_id for c in children],
-            embeddings=embeddings,
-            documents=[c.text for c in children],
-            metadatas=[_metadata(c) for c in children],
-        )
+        if not children:
+            return
+        rows = [
+            {**_row(child, i), "embedding": embedding}
+            for i, (child, embedding) in enumerate(zip(children, embeddings))
+        ]
+        with session() as sess:
+            stmt = insert(Chunk).values(rows)
+            sess.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=[Chunk.chunk_id],
+                    set_={"embedding": stmt.excluded.embedding, "text": stmt.excluded.text},
+                )
+            )
 
     def query(self, vector: list[float], k: int, doc_ids: list[str]) -> list[Hit]:
         if not doc_ids:
             return []
-        where = {"doc_id": {"$in": doc_ids}}
-        res = self._collection.query(query_embeddings=[vector], n_results=k, where=where)
-        hits = []
-        for chunk_id, doc, meta, dist in zip(
-            res["ids"][0], res["documents"][0], res["metadatas"][0], res["distances"][0]
-        ):
-            hits.append(_hit(chunk_id, doc, meta, 1.0 - dist))
-        return hits
+        distance = Chunk.embedding.cosine_distance(vector)
+        with session() as sess:
+            stmt = (
+                select(Chunk, distance.label("distance"))
+                .where(Chunk.doc_id.in_(doc_ids), Chunk.embedding.isnot(None))
+                .order_by(distance)
+                .limit(k)
+            )
+            return [to_hit(chunk, 1.0 - float(dist)) for chunk, dist in sess.execute(stmt)]
 
     def get_embeddings(self, chunk_ids: list[str]) -> dict[str, list[float]]:
         if not chunk_ids:
             return {}
-        res = self._collection.get(ids=chunk_ids, include=["embeddings"])
-        return dict(zip(res["ids"], res["embeddings"]))
+        with session() as sess:
+            stmt = select(Chunk.chunk_id, Chunk.embedding).where(Chunk.chunk_id.in_(chunk_ids))
+            return {cid: list(vec) for cid, vec in sess.execute(stmt) if vec is not None}
 
     def delete_doc(self, doc_id: str) -> None:
-        self._collection.delete(where={"doc_id": doc_id})
+        with session() as sess:
+            sess.execute(sa_delete(Chunk).where(Chunk.doc_id == doc_id))
+
+    def clear_embeddings(self, doc_id: str) -> None:
+        with session() as sess:
+            sess.execute(update(Chunk).where(Chunk.doc_id == doc_id).values(embedding=None))
 
     def all_chunks(self) -> list[Hit]:
-        res = self._collection.get()
-        return [
-            _hit(chunk_id, doc, meta, 0.0)
-            for chunk_id, doc, meta in zip(res["ids"], res["documents"], res["metadatas"])
-        ]
+        with session() as sess:
+            return [to_hit(chunk, 0.0) for chunk in sess.scalars(select(Chunk))]
 
 
-def _metadata(c: ChildChunk) -> dict:
+def _row(c: ChildChunk, ordinal: int) -> dict:
     return {
-        "parent_id": c.parent_id,
+        "chunk_id": c.chunk_id,
         "doc_id": c.doc_id,
+        "parent_id": c.parent_id,
+        "ordinal": ordinal,
         "filename": c.filename,
+        "text": c.text,
+        "embed_text": c.embed_text,
+        "lexical_text": f"{build_header(c.filename, c.section_path)}\n{c.text}",
         "page_start": c.page_start,
         "page_end": c.page_end,
-        "section_path": json.dumps(c.section_path),
+        "section_path": list(c.section_path),
         "kind": c.kind,
-        "char_span_in_parent": json.dumps(c.char_span_in_parent),
+        "char_span_in_parent": list(c.char_span_in_parent),
+        "embedding": None,
     }
 
 
-def _hit(chunk_id: str, text: str, meta: dict, score: float) -> Hit:
+def to_hit(chunk: Chunk, score: float) -> Hit:
     return Hit(
-        chunk_id=chunk_id,
-        parent_id=meta["parent_id"],
-        doc_id=meta["doc_id"],
-        filename=meta["filename"],
-        text=text,
-        page_start=meta["page_start"],
-        page_end=meta["page_end"],
-        section_path=tuple(json.loads(meta["section_path"])),
-        kind=meta["kind"],
-        char_span_in_parent=tuple(json.loads(meta["char_span_in_parent"])),
+        chunk_id=chunk.chunk_id,
+        parent_id=chunk.parent_id,
+        doc_id=chunk.doc_id,
+        filename=chunk.filename,
+        text=chunk.text,
+        page_start=chunk.page_start,
+        page_end=chunk.page_end,
+        section_path=tuple(chunk.section_path),
+        kind=chunk.kind,
+        char_span_in_parent=tuple(chunk.char_span_in_parent),
         score=score,
     )

@@ -43,21 +43,28 @@ User
 | Parsers|  | Hybrid  | | Trust  | | LLM    |
 | docling|  | search  | | layer  | | Gemini/|
 | pypdf  |  | dense + | | abstain| | Groq/  |
-| BLIP*  |  | BM25 +  | | cite   | | Ollama |
+| BLIP*  |  | tsvec + | | cite   | | Ollama |
 +--------+  | rerank  | | confid.| +--------+
   |         +---------+ +--------+
   v              |
++--------+  +-------------------+
+| Chunker|  | Postgres          |
+| parent/|  | pgvector + tsvector
+| child  |  | + docs/chunks     |
++--------+  +-------------------+
+  |              |
+  v              v
 +--------+  +---------+
-| Chunker|  | ChromaDB|
-| parent/|  | vectors |
-| child  |  +---------+
-+--------+
+| MinIO  |  | Redis   |
+| raw +  |  | cache + |
+| parents|  | locks   |
++--------+  +---------+
 ```
 
 **Data flow:**
 
-1. **Ingest**: Upload -> parse (docling for complex PDFs, pypdf for simple ones) -> structure-aware chunking (parent/child, 800/200 tokens) -> embed with `bge-base-en-v1.5` -> store in ChromaDB
-2. **Retrieve**: Question -> embed -> hybrid search (dense cosine + BM25 lexical, reciprocal rank fusion) -> optional cross-encoder reranking (default mode) -> top-k context assembly with token budget
+1. **Ingest**: Upload -> parse (docling for complex PDFs, pypdf for simple ones) -> structure-aware chunking (parent/child, 800/200 tokens) -> embed with `bge-base-en-v1.5` -> chunks and vectors to Postgres/pgvector, raw file and parent blobs to S3/MinIO
+2. **Retrieve**: Question -> embed -> hybrid search (dense cosine via pgvector + lexical via Postgres `tsvector`, reciprocal rank fusion) -> optional cross-encoder reranking (default mode) -> top-k context assembly with token budget
 3. **Generate**: Abstention gate (is there enough evidence?) -> prompt with source blocks (injection-hardened) -> LLM answers in plain text with inline `[n]` citation markers -> citation validation -> confidence scoring
 4. **Present**: Answer with inline citations, source cards with highlighted passages, trace viewer showing each stage's timing and data
 
@@ -77,9 +84,13 @@ src/                     Business logic (UI-agnostic, testable)
   api/                   FastAPI REST layer
   core/                  Config, errors, tracing
   ingestion/             Parse -> chunk -> index pipeline
-  retrieval/             Embedder, vector store, BM25, hybrid search, reranker
+  retrieval/             Embedder, pgvector store, tsvector lexical index, hybrid search, reranker
   generation/            LLM client, prompt templates, answer orchestration
   trust/                 Abstention gate, citation validation, confidence scoring
+  storage/               Postgres engine/session, ORM models, object store, Redis cache and locks
+
+migrations/              Alembic schema migrations
+docker-compose.yml       Postgres (pgvector), Redis, MinIO
 
 evaluation/              Golden set (33 items) + metrics runner
 data/sample_docs/        Three real public-domain U.S. government documents
@@ -92,8 +103,12 @@ data/sample_docs/        Three real public-domain U.S. government documents
 | **LLM** | Gemini (`gemini-3.6-flash`) by default; Groq or Ollama `qwen3:8b` as swappable providers | Free-tier cloud inference is far faster than CPU-only local generation; see **Provider Choice** below. Answers are plain text with inline `[n]` citation markers, parsed by `prompts.parse_citations` — not schema-enforced JSON. |
 | **Embeddings** | `BAAI/bge-base-en-v1.5` | Runs locally on CPU, strong retrieval quality for its size, well-tested for semantic search. |
 | **Reranker** | `mxbai-rerank-base-v1` | Cross-encoder precision pass; used as a trust signal for confidence/citation scoring, and for reranking retrieval results in the default mode. |
-| **Vector store** | ChromaDB | Embedded, file-based, zero-config. Adequate for the document scale of this assignment. |
-| **Lexical search** | BM25 (rank-bm25) | Complements dense search for keyword-heavy queries (policy numbers, proper nouns). |
+| **Vector store** | Postgres + pgvector (HNSW, cosine) | One transactional store for metadata and vectors, shared by every API worker. Replaces embedded ChromaDB, which was single-writer, per-process and unreplicable. |
+| **Lexical search** | Postgres `tsvector` + GIN | Complements dense search for keyword-heavy queries (policy numbers, proper nouns). Replaces in-process BM25, whose corpus lived in one worker's RAM. Ranking is `ts_rank_cd`; fusion is rank-based, so the change of scale is immaterial. |
+| **System of record** | Postgres (`documents`, `chunks`) via SQLAlchemy 2.0 + Alembic | Replaces `manifest.json`, which was a read-modify-write with no lock. |
+| **Blob storage** | S3/MinIO | Raw uploads and parent-chunk payloads. Survives a pod restart and is visible to every replica. |
+| **Health probes** | `/livez` static; `/health` pings backends only, memoized 10s | Safe for a k8s probe: no embedding pass, no provider call, no collection scan. |
+| **Cache and locks** | Redis | Answer cache and parent-payload cache are shared, so invalidation on ingest reaches every worker; the ingest lock serializes replace-by-filename across processes. |
 | **PDF parsing** | docling + pypdf | docling handles complex layouts (tables, figures, sections); pypdf is a fast path for simple text PDFs, saving 3-10s per file. |
 | **Figure captioning** | BLIP (`blip-image-captioning-base`) | `parsers.FigureCaptioner` runs behind the same lazy-singleton pattern as the embedder; the `/ingest` route constructs one and every extracted figure gets indexed as `[Figure, p.N: <caption>]` instead of a bare placeholder. |
 | **UI** | React + Vite | Fast, modern SPA with custom CSS modules. Replaces the older Streamlit prototype. |
@@ -114,6 +129,7 @@ The default is a cloud API, not fully-offline local inference, because CPU-only 
 
 ### Prerequisites
 - Python 3.10+
+- Docker (for Postgres, Redis and MinIO — the service has no local-disk fallback)
 - A free API key from [Google AI Studio](https://aistudio.google.com/apikey) (default provider) — or [Ollama](https://ollama.com) installed if you'd rather run fully offline
 
 ### Setup
@@ -134,11 +150,16 @@ pip install -r requirements.txt
 copy .env.example .env        # Windows
 # cp .env.example .env        # Linux/Mac
 # edit .env and set GEMINI_API_KEY (or switch LLM_PROVIDER=ollama, see Provider Choice)
+# the DATABASE_URL / REDIS_URL / S3_* defaults already match docker-compose.yml
 
-# 5. Run the FastAPI backend
-uvicorn src.api.router:app --host 127.0.0.1 --port 8000
+# 5. Start the shared state backends and apply the schema
+docker compose up -d
+alembic upgrade head
 
-# 6. In a second terminal, start the React frontend
+# 6. Run the FastAPI backend (now safe to run with multiple workers)
+uvicorn src.api.router:app --host 127.0.0.1 --port 8000 --workers 4
+
+# 7. In a second terminal, start the React frontend
 cd frontend
 npm install
 npm run dev
@@ -167,6 +188,12 @@ The app opens at `http://localhost:5173`. Upload a PDF or TXT file, wait for ind
 | `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model name |
 | `OLLAMA_HOST` | `127.0.0.1:11435` | Ollama server address, used when `LLM_PROVIDER=ollama` |
 | `OLLAMA_MODEL` | `qwen3:8b` | Ollama model name |
+| `DATABASE_URL` | _(required)_ | Postgres DSN, e.g. `postgresql+psycopg://sda:sda@127.0.0.1:5433/sda` |
+| `REDIS_URL` | _(required)_ | Redis DSN for the answer cache and ingest locks |
+| `S3_ENDPOINT` / `S3_BUCKET` | _(required)_ | Object store for raw uploads and parent blobs |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | _(required)_ | Object store credentials |
+| `S3_REGION` | `us-east-1` | Object store region |
+| `DB_POOL_SIZE` / `DB_POOL_MAX_OVERFLOW` | `5` / `10` | SQLAlchemy connection pool sizing |
 | `HF_TOKEN` | _(empty)_ | Optional; only needed for gated HF models or to avoid anonymous rate limits on embedder/reranker downloads |
 
 ### Running Tests

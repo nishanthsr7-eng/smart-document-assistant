@@ -1,12 +1,10 @@
-import dataclasses
 import re
-import threading
-from typing import Optional
 
-from rank_bm25 import BM25Okapi
+from sqlalchemy import func, select
 
-from src.ingestion.chunker import ChildChunk, build_header
-from src.retrieval.vector_store import Hit, VectorStore
+from src.storage.db import session
+from src.storage.models import Chunk
+from src.retrieval.vector_store import Hit, to_hit
 
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
@@ -20,75 +18,24 @@ def tokenize(text: str) -> list[str]:
 
 
 class KeywordIndex:
-    def __init__(self, store: VectorStore) -> None:
-        self._lock = threading.Lock()
-        self._hits = store.all_chunks()
-        self._tokens = [_tokenize_hit(h) for h in self._hits]
-        self._rebuild()
+    """Lexical retrieval over the shared Postgres tsvector index.
 
-    def _rebuild(self) -> None:
-        self._bm25: Optional[BM25Okapi] = BM25Okapi(self._tokens) if self._tokens else None
-
-    def add_doc(self, children: list[ChildChunk]) -> None:
-        if not children:
-            return
-        with self._lock:
-            present = {hit.chunk_id for hit in self._hits}
-            # Only tokenize the new chunks (B6) — re-tokenizing the whole corpus here scaled with
-            # total corpus size on every upload. BM25Okapi's own IDF pass still rescans all tokens;
-            # true incremental BM25 (or SQLite FTS5) is deferred.
-            new_hits = [_child_to_hit(c) for c in children if c.chunk_id not in present]
-            if not new_hits:
-                return
-            self._hits.extend(new_hits)
-            self._tokens.extend(_tokenize_hit(h) for h in new_hits)
-            self._rebuild()
-
-    def remove_doc(self, doc_id: str) -> None:
-        with self._lock:
-            kept = [(h, t) for h, t in zip(self._hits, self._tokens) if h.doc_id != doc_id]
-            if len(kept) == len(self._hits):
-                return
-            self._hits = [h for h, _ in kept]
-            self._tokens = [t for _, t in kept]
-            self._rebuild()
+    Replaces the in-process BM25 corpus: the index is a GIN-backed generated column on `chunks`,
+    so it is maintained by the same write that stores the chunk and is identical in every worker.
+    Ranking is ts_rank_cd rather than BM25 — fusion is rank-based, so the scale does not matter.
+    """
 
     def query(self, question: str, k: int, doc_ids: list[str]) -> list[Hit]:
-        if not doc_ids:
+        terms = tokenize(question)
+        if not doc_ids or not terms:
             return []
-        with self._lock:
-            bm25 = self._bm25
-            hits = list(self._hits)
-        if bm25 is None:
-            return []
-        scores = bm25.get_scores(tokenize(question))
-        ranked = sorted(
-            (
-                (score, hit)
-                for score, hit in zip(scores, hits)
-                if score > 0 and hit.doc_id in doc_ids
-            ),
-            key=lambda pair: pair[0],
-            reverse=True,
-        )
-        return [dataclasses.replace(hit, score=float(score)) for score, hit in ranked[:k]]
-
-
-def _tokenize_hit(hit: Hit) -> list[str]:
-    return tokenize(f"{build_header(hit.filename, hit.section_path)}\n{hit.text}")
-
-
-def _child_to_hit(c: ChildChunk) -> Hit:
-    return Hit(
-        chunk_id=c.chunk_id,
-        parent_id=c.parent_id,
-        doc_id=c.doc_id,
-        filename=c.filename,
-        text=c.text,
-        page_start=c.page_start,
-        page_end=c.page_end,
-        section_path=c.section_path,
-        kind=c.kind,
-        char_span_in_parent=c.char_span_in_parent,
-        score=0.0,
-    )
+        tsquery = func.to_tsquery("english", " | ".join(terms))
+        rank = func.ts_rank_cd(Chunk.tsv, tsquery)
+        with session() as sess:
+            stmt = (
+                select(Chunk, rank.label("rank"))
+                .where(Chunk.doc_id.in_(doc_ids), Chunk.tsv.op("@@")(tsquery), rank > 0)
+                .order_by(rank.desc())
+                .limit(k)
+            )
+            return [to_hit(chunk, float(score)) for chunk, score in sess.execute(stmt)]

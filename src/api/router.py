@@ -25,7 +25,7 @@ from src.core.errors import DocumentError, GenerationError, ModelUnavailable
 from src.core.health import check_health
 from src.generation.answerer import Answer, answer_question
 from src.ingestion.parsers import validate_upload
-from src.ingestion.pipeline import delete, ingest, list_indexed, load_children
+from src.ingestion.pipeline import delete, ingest, list_indexed
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,6 +39,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/livez")
+def livez() -> dict[str, str]:
+    """Liveness: the process is running. Never touches a backend."""
+    return {"status": "ok"}
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -66,13 +72,11 @@ async def ingest_document(file: UploadFile = File(...)) -> IngestResponse:
     filename = file.filename or "upload"
     try:
         validate_upload(filename, data)
-        report = ingest(filename, data, captioner=deps.figure_captioner())
+        report = ingest(
+            filename, data, deps.embedder(), captioner=deps.figure_captioner()
+        )
     except DocumentError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
-    if report.replaced_doc_id:
-        deps.vector_store().delete_doc(report.replaced_doc_id)
-        deps.keyword_index().remove_doc(report.replaced_doc_id)
-    _index_doc(report.doc_id)
     return IngestResponse(
         doc_id=report.doc_id,
         filename=report.filename,
@@ -86,8 +90,6 @@ async def ingest_document(file: UploadFile = File(...)) -> IngestResponse:
 @app.delete("/documents/{doc_id}")
 def delete_document(doc_id: str) -> dict[str, str]:
     delete(doc_id)
-    deps.vector_store().delete_doc(doc_id)
-    deps.keyword_index().remove_doc(doc_id)
     return {"status": "deleted", "doc_id": doc_id}
 
 
@@ -151,16 +153,6 @@ def _stream_answer(request: QueryRequest):
         if event == "__end__":
             return
         yield _sse(event, data)
-
-
-def _index_doc(doc_id: str) -> None:
-    store = deps.vector_store()
-    if store.has_doc(doc_id):
-        return
-    children = load_children(doc_id)
-    embeddings = deps.embedder().encode([c.embed_text for c in children])
-    store.add(children, embeddings)
-    deps.keyword_index().add_doc(children)
 
 
 def _to_response(answer: Answer) -> QueryResponse:

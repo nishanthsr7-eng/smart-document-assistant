@@ -73,8 +73,11 @@ class DocumentOut(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     provider: str
+    postgres: str
+    redis: str
+    object_store: str
     embedder: str
-    vector_store: str
+    reranker: str
     llm: str
 
 
