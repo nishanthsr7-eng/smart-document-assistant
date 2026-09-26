@@ -40,6 +40,15 @@ def put_raw(doc_id: str, filename: str, data: bytes) -> str:
     return key
 
 
+def get_raw(doc_id: str, filename: str) -> bytes:
+    key = f"{_RAW_PREFIX}/{doc_id}/{filename}"
+    try:
+        body: bytes = _client().get_object(Bucket=SETTINGS.storage.s3_bucket, Key=key)["Body"].read()
+        return body
+    except ClientError as exc:
+        raise StorageError(f"Staged upload missing for document {doc_id}.") from exc
+
+
 def put_parents(doc_id: str, payload: bytes) -> str:
     key = f"{_PARENTS_PREFIX}/{doc_id}.json"
     _client().put_object(

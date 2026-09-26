@@ -159,7 +159,10 @@ alembic upgrade head
 # 6. Run the FastAPI backend (now safe to run with multiple workers)
 uvicorn src.api.router:app --host 127.0.0.1 --port 8000 --workers 4
 
-# 7. In a second terminal, start the React frontend
+# 7. In a second terminal, start the ingest worker (uploads are queued, not parsed in the API)
+python -m arq src.ingestion.worker.WorkerSettings
+
+# 8. In a third terminal, start the React frontend
 cd frontend
 npm install
 npm run dev

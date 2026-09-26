@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -5,7 +6,6 @@ from fastapi.testclient import TestClient
 
 from src.api import deps, router
 from src.core.config import SETTINGS
-from src.ingestion.pipeline import IngestReport
 
 PDF_BYTES = b"%PDF-1.4\n%mock pdf content\n"
 
@@ -39,46 +39,101 @@ def fake_infra(monkeypatch):
 # --- POST /ingest ---
 
 
-def test_ingest_happy_path(client, fake_infra, monkeypatch):
-    report = IngestReport(
-        doc_id="abc123",
-        filename="policy.pdf",
-        pages=3,
-        elements_by_kind={"paragraph": 5},
-        num_parents=2,
-        num_children=4,
-        outcome="indexed",
-    )
-    monkeypatch.setattr(router, "ingest", lambda filename, data, embedder, captioner=None: report)
+class _FakeQueue:
+    def __init__(self) -> None:
+        self.enqueued: list[tuple] = []
 
+    async def enqueue_job(self, fn, doc_id, filename, job_id, _job_id, _queue_name):
+        if any(job[3] == _job_id for job in self.enqueued):
+            return None
+        self.enqueued.append((fn, doc_id, filename, _job_id))
+        return SimpleNamespace(job_id=_job_id)
+
+
+@pytest.fixture
+def fake_queue(monkeypatch):
+    queue = _FakeQueue()
+    state: dict[str, dict] = {}
+
+    async def pool():
+        return queue
+
+    claims: dict[str, str] = {}
+
+    def claim(doc_id: str, job_id: str):
+        holder = claims.get(doc_id)
+        if holder is None:
+            claims[doc_id] = job_id
+        return holder
+
+    monkeypatch.setattr(router.jobs, "pool", pool)
+    monkeypatch.setattr(router.jobs, "claim", claim)
+    monkeypatch.setattr(router.jobs, "get", lambda job_id: state.get(job_id))
+    monkeypatch.setattr(
+        router.jobs,
+        "record_queued",
+        lambda job_id, doc_id, filename: state.update(
+            {
+                job_id: {
+                    "job_id": job_id,
+                    "doc_id": doc_id,
+                    "filename": filename,
+                    "status": "queued",
+                    "stage": "Queued",
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(router.objects, "put_raw", lambda doc_id, filename, data: "key")
+    return SimpleNamespace(queue=queue, state=state)
+
+
+def test_ingest_queues_a_job_instead_of_parsing_inline(client, fake_queue):
     resp = client.post("/ingest", files={"file": ("policy.pdf", PDF_BYTES, "application/pdf")})
 
-    assert resp.status_code == 200
+    assert resp.status_code == 202
     body = resp.json()
-    assert body["doc_id"] == "abc123"
-    assert body["outcome"] == "indexed"
-    assert body["num_children"] == 4
+    assert body["status"] == "queued"
+    assert body["report"] is None
+    assert body["job_id"] == f"ingest:{hashlib.sha256(PDF_BYTES).hexdigest()}"
+    assert len(fake_queue.queue.enqueued) == 1
+    assert fake_queue.queue.enqueued[0][0] == "ingest_job"
 
 
-def test_ingest_replaces_superseded_doc(client, fake_infra, monkeypatch):
-    report = IngestReport(
-        doc_id="new1",
-        filename="policy.pdf",
-        pages=1,
-        elements_by_kind={},
-        num_parents=1,
-        num_children=1,
-        outcome="replaced",
-        replaced_doc_id="old1",
-    )
-    monkeypatch.setattr(router, "ingest", lambda filename, data, embedder, captioner=None: report)
+def test_ingest_of_in_flight_bytes_returns_the_same_job(client, fake_queue):
+    first = client.post("/ingest", files={"file": ("policy.pdf", PDF_BYTES, "application/pdf")})
+    second = client.post("/ingest", files={"file": ("policy.pdf", PDF_BYTES, "application/pdf")})
 
-    resp = client.post("/ingest", files={"file": ("policy.pdf", PDF_BYTES, "application/pdf")})
+    assert second.status_code == 200
+    assert second.json()["job_id"] == first.json()["job_id"]
+    assert len(fake_queue.queue.enqueued) == 1
+
+
+def test_job_status_reports_the_finished_report(client, fake_queue):
+    fake_queue.state["ingest:abc"] = {
+        "job_id": "ingest:abc",
+        "doc_id": "abc",
+        "filename": "policy.pdf",
+        "status": "done",
+        "stage": "Indexed",
+        "report": {
+            "doc_id": "abc",
+            "filename": "policy.pdf",
+            "pages": 3,
+            "num_parents": 2,
+            "num_children": 4,
+            "outcome": "indexed",
+        },
+    }
+
+    resp = client.get("/jobs/ingest:abc")
 
     assert resp.status_code == 200
-    # The superseded doc's rows are removed inside ingest, under the cross-worker ingest lock.
-    assert resp.json()["outcome"] == "replaced"
-    assert resp.json()["doc_id"] == "new1"
+    assert resp.json()["report"]["num_children"] == 4
+
+
+def test_job_status_unknown_job_is_404(client, fake_queue):
+    assert client.get("/jobs/ingest:missing").status_code == 404
 
 
 def test_ingest_rejects_oversize_file(client):

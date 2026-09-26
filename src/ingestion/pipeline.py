@@ -141,6 +141,14 @@ def delete(doc_id: str) -> None:
     ANSWER_CACHE.clear()
 
 
+def discard_failed(doc_id: str) -> None:
+    """Drop the half-written rows and blobs of a failed ingest. Never touches a live document."""
+    with session() as sess:
+        sess.execute(sa_delete(Document).where(Document.doc_id == doc_id, Document.state != "live"))
+    objects.delete_doc(doc_id)
+    DOC_CACHE.delete(doc_id)
+
+
 def load_parents(doc_id: str) -> list[ParentChunk]:
     payload = DOC_CACHE.get(doc_id)
     if payload is None:

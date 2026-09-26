@@ -45,6 +45,21 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class JobsConfig:
+    """Ingest job queue (arq on Redis). Ingest runs in a worker, never on the request path."""
+
+    queue_name: str = "sda:ingest"
+    dlq_key: str = "sda:ingest:dlq"
+    dlq_max_len: int = 500
+    state_ttl_s: int = 3600
+    keep_result_s: int = 3600
+    job_timeout_s: int = 900
+    concurrency: int = int(os.environ.get("INGEST_CONCURRENCY", "1"))
+    progress_poll_s: float = 0.4
+    progress_timeout_s: int = 1800
+
+
+@dataclass(frozen=True)
 class ModelConfig:
     embedder_name: str = "BAAI/bge-base-en-v1.5"
     embedder_query_prefix: str = "Represent this sentence for searching relevant passages: "
@@ -120,6 +135,7 @@ class GenerationConfig:
 class Settings:
     paths: Paths
     storage: StorageConfig
+    jobs: JobsConfig
     models: ModelConfig
     ingestion: IngestionConfig
     retrieval: RetrievalConfig
@@ -140,6 +156,7 @@ def _build_settings() -> Settings:
     return Settings(
         paths=Paths(),
         storage=StorageConfig(),
+        jobs=JobsConfig(),
         models=models,
         ingestion=ingestion,
         retrieval=RetrievalConfig(),

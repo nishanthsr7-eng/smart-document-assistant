@@ -27,14 +27,22 @@ export function useDocuments() {
     const uploadId = crypto.randomUUID()
     setUploads((prev) => [
       ...prev,
-      { id: uploadId, filename: file.name, progress: 0, status: 'uploading', error: null },
+      { id: uploadId, filename: file.name, progress: 0, status: 'uploading', stage: null, error: null },
     ])
-    const setProgress = (p) =>
-      setUploads((prev) =>
-        prev.map((u) => (u.id === uploadId ? { ...u, progress: p } : u))
-      )
+    const patch = (fields) =>
+      setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, ...fields } : u)))
     try {
-      const report = await api.uploadDocument(file, setProgress)
+      const job = await api.uploadDocument(file, (p) => patch({ progress: p }))
+      patch({ status: 'indexing', progress: 85, stage: job.stage })
+      let report = job.report
+      if (!report) {
+        await api.streamJobProgress(job.job_id, {
+          onProgress: (stage) => patch({ stage, progress: 90 }),
+          onDone: (done) => {
+            report = done.report
+          },
+        })
+      }
       setDocs((prev) => ({
         [report.doc_id]: {
           filename: report.filename,
@@ -45,18 +53,12 @@ export function useDocuments() {
         },
         ...prev,
       }))
-      setUploads((prev) =>
-        prev.map((u) => (u.id === uploadId ? { ...u, status: 'done', progress: 100 } : u))
-      )
+      patch({ status: 'done', progress: 100, stage: null })
       setTimeout(() => {
         setUploads((prev) => prev.filter((u) => u.id !== uploadId))
       }, 2500)
     } catch (err) {
-      setUploads((prev) =>
-        prev.map((u) =>
-          u.id === uploadId ? { ...u, status: 'error', error: err.message } : u
-        )
-      )
+      patch({ status: 'error', error: err.message })
       setDocs((prev) => {
         const n = { ...prev }
         // Store error entry with a temp key

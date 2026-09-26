@@ -13,6 +13,8 @@ export default function ProgressToast({ uploads }) {
               ? u.error
               : u.status === 'done'
               ? 'Added'
+              : u.status === 'indexing'
+              ? `${u.stage || 'Indexing'}…`
               : `Uploading… ${u.progress}%`}
           </div>
         </div>

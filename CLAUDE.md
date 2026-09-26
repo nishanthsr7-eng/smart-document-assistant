@@ -47,6 +47,7 @@ Finish/revert current edit, write `docs/handoff.md` (terse bullets: done, pendin
 ## Dev server
 Shared state first: `docker compose up -d` then `alembic upgrade head` (Postgres 5433, Redis 6380, MinIO 9002). No local-disk fallback: the API will not start without them.
 FastAPI backend on port 8000: `uvicorn src.api.router:app --host 127.0.0.1 --port 8000 --workers 4`
+Ingest worker (required -- `/ingest` only queues): `python -m arq src.ingestion.worker.WorkerSettings`
 React frontend on port 5173: `cd frontend && npm run dev`
 
 ## Security & Git

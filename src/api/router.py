@@ -1,9 +1,15 @@
+import asyncio
+import hashlib
 import json
 import logging
 import queue
 import threading
+import uuid
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import anyio
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -14,7 +20,7 @@ from src.api.schemas import (
     ConflictOut,
     DocumentOut,
     HealthResponse,
-    IngestResponse,
+    JobOut,
     QueryRequest,
     QueryResponse,
     SentenceOut,
@@ -24,13 +30,22 @@ from src.core.config import SETTINGS
 from src.core.errors import DocumentError, GenerationError, ModelUnavailable
 from src.core.health import check_health
 from src.generation.answerer import Answer, answer_question
+from src.ingestion import jobs
 from src.ingestion.parsers import validate_upload
-from src.ingestion.pipeline import delete, ingest, list_indexed
+from src.ingestion.pipeline import delete, list_indexed
+from src.storage import objects
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Smart Document Assistant", version="1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    yield
+    await jobs.close_pool()
+
+
+app = FastAPI(title="Smart Document Assistant", version="1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -66,25 +81,93 @@ def documents() -> list[DocumentOut]:
     return [DocumentOut(**doc) for doc in list_indexed()]
 
 
-@app.post("/ingest", response_model=IngestResponse)
-async def ingest_document(file: UploadFile = File(...)) -> IngestResponse:
+@app.post("/ingest", response_model=JobOut, status_code=202)
+async def ingest_document(response: Response, file: UploadFile = File(...)) -> JobOut:
+    """Stage the upload and queue it. Parsing and embedding happen in the ingest worker."""
     data = await file.read()
     filename = file.filename or "upload"
     try:
         validate_upload(filename, data)
-        report = ingest(
-            filename, data, deps.embedder(), captioner=deps.figure_captioner()
-        )
     except DocumentError as exc:
         raise HTTPException(status_code=400, detail=exc.message) from exc
-    return IngestResponse(
-        doc_id=report.doc_id,
-        filename=report.filename,
-        pages=report.pages,
-        num_parents=report.num_parents,
-        num_children=report.num_children,
-        outcome=report.outcome,
+
+    doc_id = hashlib.sha256(data).hexdigest()
+    job_id = jobs.job_id_for(doc_id)
+
+    # Idempotency key is the content hash: the same bytes in flight are one job, not two.
+    holder = await anyio.to_thread.run_sync(jobs.claim, doc_id, job_id)
+    if holder is not None:
+        state = await anyio.to_thread.run_sync(jobs.get, holder)
+        if state is not None:
+            response.status_code = 200
+            return JobOut(**state)
+
+    await anyio.to_thread.run_sync(jobs.record_queued, job_id, doc_id, filename)
+    await anyio.to_thread.run_sync(objects.put_raw, doc_id, filename, data)
+    await _enqueue(job_id, doc_id, filename)
+    return JobOut(job_id=job_id, doc_id=doc_id, filename=filename, status=jobs.QUEUED, stage="Queued")
+
+
+async def _enqueue(job_id: str, doc_id: str, filename: str, attempt: int = 0) -> None:
+    """Queue the work. Job state lives under job_id; arq's own id changes between attempts,
+    because arq keeps the key of a finished job and would silently drop a re-run."""
+    arq_id = job_id if attempt == 0 else f"{job_id}:{uuid.uuid4().hex[:8]}"
+    enqueued = await (await jobs.pool()).enqueue_job(
+        "ingest_job",
+        doc_id,
+        filename,
+        job_id,
+        _job_id=arq_id,
+        _queue_name=SETTINGS.jobs.queue_name,
     )
+    if enqueued is None:
+        await _enqueue(job_id, doc_id, filename, attempt + 1)
+
+
+@app.get("/jobs/dead-letters")
+async def dead_letters() -> list[dict]:
+    """Poison documents: jobs that failed terminally, newest first."""
+    return await anyio.to_thread.run_sync(jobs.dead_letters)
+
+
+@app.get("/jobs/{job_id}", response_model=JobOut)
+async def job_status(job_id: str) -> JobOut:
+    state = await anyio.to_thread.run_sync(jobs.get, job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Unknown job.")
+    return JobOut(**state)
+
+
+@app.get("/jobs/{job_id}/events")
+async def job_events(job_id: str, request: Request) -> StreamingResponse:
+    return StreamingResponse(_stream_job(job_id, request), media_type="text/event-stream")
+
+
+async def _stream_job(job_id: str, request: Request) -> AsyncIterator[str]:
+    """Poll the job's Redis state and push every change. Ends on terminal state or disconnect."""
+    deadline = asyncio.get_running_loop().time() + SETTINGS.jobs.progress_timeout_s
+    last: tuple[str, str] = ("", "")
+    while True:
+        if await request.is_disconnected():
+            return
+        state = await anyio.to_thread.run_sync(jobs.get, job_id)
+        if state is None:
+            yield _sse("error", {"detail": "Unknown job."})
+            return
+        current = (state["status"], state.get("stage", ""))
+        if current != last:
+            last = current
+            if state["status"] == jobs.DONE:
+                yield _sse("done", JobOut(**state).model_dump())
+                return
+            if state["status"] == jobs.FAILED:
+                yield _sse("error", {"detail": state.get("error", "Ingest failed.")})
+                return
+            yield _sse("progress", {"status": state["status"], "stage": current[1]})
+        if asyncio.get_running_loop().time() > deadline:
+            yield _sse("error", {"detail": "Timed out waiting for ingest to finish."})
+            return
+        await asyncio.sleep(SETTINGS.jobs.progress_poll_s)
 
 
 @app.delete("/documents/{doc_id}")

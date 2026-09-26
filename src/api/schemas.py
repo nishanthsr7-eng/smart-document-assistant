@@ -63,6 +63,16 @@ class IngestResponse(BaseModel):
     outcome: str
 
 
+class JobOut(BaseModel):
+    job_id: str
+    doc_id: str
+    filename: str
+    status: str
+    stage: str
+    error: Optional[str] = None
+    report: Optional[IngestResponse] = None
+
+
 class DocumentOut(BaseModel):
     doc_id: str
     filename: str

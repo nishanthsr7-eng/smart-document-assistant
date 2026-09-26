@@ -42,7 +42,7 @@ export async function uploadDocument(file, onProgress) {
         } catch {
           resolve({})
         }
-        if (onProgress) onProgress(100)
+        if (onProgress) onProgress(80)
       } else {
         let msg = `HTTP ${xhr.status}`
         try { msg = JSON.parse(xhr.responseText).detail || msg } catch {}
@@ -53,6 +53,17 @@ export async function uploadDocument(file, onProgress) {
     const fd = new FormData()
     fd.append('file', file)
     xhr.send(fd)
+  })
+}
+
+// The upload returns a queued job; indexing progress arrives on this stream.
+export async function streamJobProgress(jobId, { onProgress, onDone } = {}) {
+  const res = await fetch(`${BASE}/jobs/${encodeURIComponent(jobId)}/events`)
+  if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)
+  await readSse(res, (event, data) => {
+    if (event === 'progress') onProgress?.(data.stage)
+    else if (event === 'done') onDone?.(data)
+    else if (event === 'error') throw new Error(data.detail)
   })
 }
 
@@ -74,6 +85,14 @@ export async function streamQuery(question, docIds, mode, history, { onToken, on
     throw new Error(detail)
   }
 
+  await readSse(res, (event, data) => {
+    if (event === 'token') onToken?.(data.text)
+    else if (event === 'done') onDone?.(data)
+    else if (event === 'error') throw new Error(data.detail)
+  })
+}
+
+async function readSse(res, handle) {
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -88,11 +107,7 @@ export async function streamQuery(question, docIds, mode, history, { onToken, on
       const eventMatch = raw.match(/^event: (.+)$/m)
       const dataMatch = raw.match(/^data: (.+)$/m)
       if (!dataMatch) continue
-      const event = eventMatch ? eventMatch[1] : 'message'
-      const data = JSON.parse(dataMatch[1])
-      if (event === 'token') onToken?.(data.text)
-      else if (event === 'done') onDone?.(data)
-      else if (event === 'error') throw new Error(data.detail)
+      handle(eventMatch ? eventMatch[1] : 'message', JSON.parse(dataMatch[1]))
     }
   }
 }

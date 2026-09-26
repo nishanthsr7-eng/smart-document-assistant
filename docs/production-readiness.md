@@ -50,7 +50,7 @@ the BM25 corpus still live in each process. `chromadb` and `rank-bm25` are dropp
 Qdrant arguments (sparse vectors, quantization, snapshot/restore) still stand if the corpus grows
 past what one Postgres comfortably serves.
 
-### 3. Ingestion runs inside the HTTP request and blocks the event loop
+### 3. Ingestion runs inside the HTTP request and blocks the event loop — **DONE**
 `ingest_document` (`src/api/router.py:63`) is `async def` but calls synchronous docling parsing, BLIP
 captioning and embedding directly. That blocks the **whole event loop** — during a 90s PDF ingest
 every other request, including `/health`, hangs.
@@ -59,6 +59,18 @@ every other request, including `/health`, hangs.
 durable multi-step pipelines with per-stage retries and visibility. `POST /documents` returns `202` +
 `job_id`; progress over SSE/WebSocket from job state in Redis; idempotency key = content hash; DLQ
 for poison documents; separate CPU/GPU worker pool scaled independently from the API.
+
+**Done, with arq.** `POST /ingest` validates, stages the raw bytes in the object store and returns
+`202` with a `job_id`; `src/ingestion/worker.py` is a separate process (`python -m arq
+src.ingestion.worker.WorkerSettings`) that runs the pipeline in a thread off its event loop.
+Progress is streamed from `GET /jobs/{job_id}/events` (per-stage SSE, ends on terminal state or
+client disconnect) and polled from `GET /jobs/{job_id}`; terminal failures land in a Redis DLQ
+readable at `GET /jobs/dead-letters`, and a failed job drops its pending row and staged blob.
+The idempotency key is the content hash: a Redis claim on `sha256(bytes)` collapses a concurrent
+burst into one job. Measured on a 13-page PDF: `POST /ingest` returns in 0.42s against a 23.5s
+ingest, and `/livez` stays at 3ms p50 / 27ms max throughout — previously the whole event loop was
+blocked for the duration. Not done: a GPU/CPU worker pool split, and automatic retries (a failed
+job is terminal and waits in the DLQ).
 
 ### 4. Upload path OOMs on a large POST
 `data = await file.read()` buffers the entire body into RAM, and `validate_upload`
@@ -275,7 +287,7 @@ streams, 12-factor compliance throughout.
 
 1. ~~**Postgres + S3 + Redis** — kill process-local state (unblocks everything)~~ **done**
 2. ~~**pgvector or Qdrant** — retire embedded Chroma and in-memory BM25~~ **done** (pgvector)
-3. **Async ingest workers** — get parsing off the request path
+3. ~~**Async ingest workers** — get parsing off the request path~~ **done** (arq)
 4. **Auth + tenancy** — with the cross-tenant isolation test
 5. **Docker + CI + Helm** — reproducible deploys
 6. **OpenTelemetry + Prometheus + Langfuse** — so it can be seen
