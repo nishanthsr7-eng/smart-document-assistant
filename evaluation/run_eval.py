@@ -10,19 +10,19 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sqlalchemy.dialects.postgresql import insert  # noqa: E402
+
+from src.auth.principal import Principal  # noqa: E402
 from src.core.config import SETTINGS  # noqa: E402
 from src.generation.answerer import Answer, answer_question  # noqa: E402
 from src.generation.client import build_client  # noqa: E402
 from src.ingestion.pipeline import ingest  # noqa: E402
 from src.retrieval.embedder import Embedder  # noqa: E402
 from src.retrieval.keyword_index import KeywordIndex  # noqa: E402
-from sqlalchemy.dialects.postgresql import insert  # noqa: E402
-
-from src.auth.principal import Principal  # noqa: E402
-from src.storage.db import session  # noqa: E402
-from src.storage.models import Tenant  # noqa: E402
 from src.retrieval.reranker import Reranker  # noqa: E402
 from src.retrieval.vector_store import Hit, VectorStore  # noqa: E402
+from src.storage.db import session  # noqa: E402
+from src.storage.models import Tenant  # noqa: E402
 
 GOLDEN_SET = Path(__file__).parent / "golden_set.yaml"
 RESULTS_DIR = Path(__file__).parent / "results"

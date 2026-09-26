@@ -20,3 +20,6 @@ Thumbs.db
 .mypy_cache/
 video/
 .claude/skills/
+.coverage
+coverage.xml
+htmlcov/

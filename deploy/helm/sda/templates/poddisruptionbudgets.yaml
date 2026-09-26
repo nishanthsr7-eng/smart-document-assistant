@@ -1,0 +1,16 @@
+{{- range $component, $spec := dict "api" .Values.api "worker" .Values.worker }}
+{{- if $spec.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sda.fullname" $ }}-{{ $component }}
+  labels: {{- include "sda.labels" $ | nindent 4 }}
+spec:
+  minAvailable: {{ $spec.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: {{ $component }}
+{{- end }}
+{{- end }}

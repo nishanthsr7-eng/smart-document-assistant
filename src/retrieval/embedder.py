@@ -1,3 +1,5 @@
+from typing import cast
+
 from sentence_transformers import SentenceTransformer
 
 from src.core.config import SETTINGS
@@ -9,9 +11,10 @@ class Embedder:
         self._query_prefix = SETTINGS.models.embedder_query_prefix
 
     def encode(self, texts: list[str]) -> list[list[float]]:
-        return self._model.encode(
+        vectors = self._model.encode(
             texts, normalize_embeddings=True, batch_size=32, show_progress_bar=False
-        ).tolist()
+        )
+        return cast(list[list[float]], vectors.tolist())
 
     def encode_query(self, texts: list[str]) -> list[list[float]]:
         """Encode queries with instruction prefix for asymmetric retrieval."""

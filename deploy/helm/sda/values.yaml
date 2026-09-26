@@ -1,0 +1,93 @@
+# The API and the worker run the same image and scale independently: the API is IO-bound and
+# cheap, the worker is CPU-bound and holds the model weights during a parse.
+image:
+  repository: ghcr.io/example/sda-backend
+  tag: ""          # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+frontendImage:
+  repository: ghcr.io/example/sda-frontend
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+api:
+  replicas: 3
+  workers: 4       # uvicorn workers per pod
+  resources:
+    requests: {cpu: "500m", memory: 2Gi}
+    limits: {cpu: "2", memory: 4Gi}
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+  # SSE answer streams must finish; the API drains before the pod goes away.
+  terminationGracePeriodSeconds: 120
+
+worker:
+  replicas: 2
+  concurrency: 1   # jobs in flight per worker process
+  resources:
+    requests: {cpu: "1", memory: 4Gi}
+    limits: {cpu: "4", memory: 8Gi}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  # A 200-page PDF parse must not be torn out from under the job.
+  terminationGracePeriodSeconds: 960
+
+frontend:
+  replicas: 2
+  resources:
+    requests: {cpu: "10m", memory: 32Mi}
+    limits: {cpu: "200m", memory: 128Mi}
+
+migrations:
+  enabled: true    # pre-install/pre-upgrade Job running `alembic upgrade head`
+
+ingress:
+  enabled: true
+  className: nginx
+  host: sda.example.com
+  annotations:
+    # SSE: no response buffering, and a read timeout longer than a slow answer.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: 25m
+  tls: []
+
+# Non-secret configuration. Rendered into a ConfigMap and mounted as env.
+config:
+  DATABASE_URL: postgresql+psycopg://sda:sda@sda-postgres:5432/sda
+  REDIS_URL: redis://sda-redis:6379/0
+  S3_ENDPOINT: http://sda-objectstore:9000
+  S3_BUCKET: sda-documents
+  S3_REGION: us-east-1
+  LLM_PROVIDER: gemini
+  GEMINI_MODEL: gemini-3.6-flash
+  DB_POOL_SIZE: "5"
+  DB_POOL_MAX_OVERFLOW: "10"
+  ACCESS_TOKEN_TTL_S: "43200"
+
+# Secrets. `existingSecret` is the production path: point at a Secret written by an external
+# secrets operator and leave `secrets` empty so nothing lands in values or in Helm history.
+existingSecret: ""
+secrets: {}
+  # JWT_SECRET: ""
+  # GEMINI_API_KEY: ""
+  # S3_ACCESS_KEY: ""
+  # S3_SECRET_KEY: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

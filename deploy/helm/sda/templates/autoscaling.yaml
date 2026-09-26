@@ -1,0 +1,24 @@
+{{- range $component, $spec := dict "api" .Values.api "worker" .Values.worker }}
+{{- if $spec.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "sda.fullname" $ }}-{{ $component }}
+  labels: {{- include "sda.labels" $ | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "sda.fullname" $ }}-{{ $component }}
+  minReplicas: {{ $spec.autoscaling.minReplicas }}
+  maxReplicas: {{ $spec.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $spec.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end }}

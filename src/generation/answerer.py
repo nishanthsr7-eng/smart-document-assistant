@@ -305,7 +305,7 @@ def answer_question(
 
         validated: dict[tuple[str, tuple[int, ...]], citations.CitationCheck] = {}
         for batch, future in validation_futures:
-            for sent, batch_check in zip(batch, future.result()):
+            for sent, batch_check in zip(batch, future.result(), strict=True):
                 validated[(sent.text, tuple(sent.cites))] = batch_check
         for sent in sentences:
             check = validated.get((sent.text, tuple(sent.cites))) if sent.cites else None
@@ -509,7 +509,7 @@ def _mmr_order(
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
-    return sum(x * y for x, y in zip(a, b))
+    return sum(x * y for x, y in zip(a, b, strict=True))
 
 
 def _center_on_span(text: str, span: tuple[int, int], pad_tokens: int) -> tuple[str, tuple[int, int]]:

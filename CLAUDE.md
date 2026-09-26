@@ -50,6 +50,8 @@ Shared state first: `docker compose up -d` then `alembic upgrade head` (Postgres
 FastAPI backend on port 8000: `uvicorn src.api.router:app --host 127.0.0.1 --port 8000 --workers 4`
 Ingest worker (required -- `/ingest` only queues): `python -m arq src.ingestion.worker.WorkerSettings`
 React frontend on port 5173: `cd frontend && npm run dev`
+Whole stack in containers instead: `docker compose --profile app up -d --build` (SPA on 8080).
+Lint/type/test tooling: `pip install -r requirements-dev.txt`; CI gates on `ruff check`, `mypy src`, `pytest --cov-fail-under=65`.
 
 ## Security & Git
 - Generation needs an API key (`GEMINI_API_KEY`/`GROQ_API_KEY`) unless `LLM_PROVIDER=ollama`. Never commit `.env`. Keep `.env.example` updated.

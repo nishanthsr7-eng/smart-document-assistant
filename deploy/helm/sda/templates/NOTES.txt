@@ -1,0 +1,13 @@
+{{ .Chart.Name }} {{ .Chart.Version }} released as {{ .Release.Name }}.
+
+{{ if .Values.ingress.enabled -}}
+  URL: http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else -}}
+  No ingress. Port-forward: kubectl port-forward svc/{{ include "sda.fullname" . }}-frontend 8080:80
+{{- end }}
+
+This chart ships the API, the ingest worker and the SPA only. Postgres (with pgvector), Redis
+and an S3-compatible object store are dependencies you point at through `config` and `secrets`;
+run them as managed services.
+
+Check: kubectl logs job/{{ include "sda.fullname" . }}-migrate

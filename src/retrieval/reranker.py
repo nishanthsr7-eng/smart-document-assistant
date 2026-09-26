@@ -18,7 +18,7 @@ class Reranker:
         probabilities = self.score([(question, hit.text) for hit in candidates])
         reranked = [
             dataclasses.replace(hit, score=probability)
-            for hit, probability in zip(candidates, probabilities)
+            for hit, probability in zip(candidates, probabilities, strict=True)
         ]
         reranked.sort(key=lambda h: h.score, reverse=True)
         return reranked

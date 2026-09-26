@@ -2,3 +2,9 @@
 *.png binary
 *.jpg binary
 *.jpeg binary
+
+# Anything that runs inside a Linux container must be checked out with LF, or the shebang
+# line arrives as "/bin/sh\r" and the container fails to start.
+*.sh text eol=lf
+*.Dockerfile text eol=lf
+*.conf.template text eol=lf

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: sda
+description: Smart Document Assistant - API, ingest worker and SPA
+type: application
+version: 0.1.0
+appVersion: "1.0"

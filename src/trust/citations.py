@@ -47,7 +47,7 @@ def validate_batch(sentences: list, source_texts: dict[int, str], reranker: Rera
 
     scores = reranker.score(pairs)
     best: dict[int, float] = {}
-    for idx, score in zip(owners, scores):
+    for idx, score in zip(owners, scores, strict=True):
         best[idx] = max(best.get(idx, -1e9), score)
 
     for idx, score in best.items():
@@ -79,9 +79,12 @@ def detect_conflicts(sentences: list[tuple[str, list[int]]], source_docs: dict[i
     return conflicts
 
 
+def _shape_words(text: str) -> set[str]:
+    return set(_NUMBER_RE.sub("#", text).lower().split())
+
+
 def _same_claim_shape(a: str, b: str) -> bool:
-    strip = lambda t: set(_NUMBER_RE.sub("#", t).lower().split())
-    words_a, words_b = strip(a), strip(b)
+    words_a, words_b = _shape_words(a), _shape_words(b)
     if not words_a or not words_b:
         return False
     return len(words_a & words_b) / max(len(words_a), len(words_b)) >= 0.5
@@ -101,7 +104,7 @@ def _grounded(text: str, cited_text: str) -> float:
 
 def _normalize_number(text: str) -> str:
     # Drop thousands separators and trailing decimal zeros so "4,000" == "4000" and "8.0" == "8".
-    def _fmt(match: re.Match) -> str:
+    def _fmt(match: re.Match[str]) -> str:
         raw = match.group(0).replace(",", "")
         if "." in raw:
             raw = raw.rstrip("0").rstrip(".")

@@ -117,7 +117,7 @@ answer contains its own figure and never B's while naming both documents in the 
 Not done: an external IdP (this is a local HS256 issuer, not OIDC/Keycloak), refresh tokens and
 revocation, token rotation, and per-tenant rate limits (item 11).
 
-### 6. No container, no CI, no deploy artifact
+### 6. No container, no CI, no deploy artifact — **DONE**
 No Dockerfile, no compose, no pipeline. Model weights (~1.5 GB across bge + mxbai + BLIP) download
 from HuggingFace on first use, so a cold pod is minutes of downloading before readiness.
 
@@ -126,6 +126,63 @@ PVC; `docker-compose` for local (api, worker, postgres, redis, qdrant, minio); H
 separate api/worker deployments, HPA, PDB, resource limits; GitHub Actions running `ruff`,
 `mypy --strict`, `pytest --cov` with a coverage floor, `oxlint`, `npm run build`, `pip-audit`, Trivy
 image scan, and the eval suite. Terraform for infra.
+
+**Done.** `docker/backend.Dockerfile` is multi-stage (deps -> model bake -> runtime) and produces
+one image serving three roles through its entrypoint argument: `api`, `worker`, `migrate`. The API
+and the worker being the same artifact is the point -- they share the pipeline code and cannot
+drift apart on dependencies. Weights are baked (bge, mxbai, BLIP, docling artifacts, ~1.5 GB) so a
+cold replica is ready in seconds rather than after a HuggingFace pull, and `HF_HUB_OFFLINE=1` makes
+a missed bake fail loudly instead of quietly reaching for the network at request time.
+`docker/frontend.Dockerfile` builds the SPA and serves it from unprivileged nginx, which also
+proxies `/api` to the API service -- one origin, so no CORS in a deployed environment and no API
+hostname baked into the bundle. Both images run non-root with a read-only root filesystem.
+
+`docker-compose.yml` gained an `app` profile (`docker compose --profile app up -d --build`) with
+`migrate`, `api`, `worker` and `frontend`. The profile keeps the documented dev loop -- plain
+`docker compose up -d` for shared state, code on the host -- unchanged.
+
+`deploy/helm/sda` has separate API and worker deployments with their own resource envelopes, HPAs
+and PDBs, a `pre-install,pre-upgrade` hook Job for `alembic upgrade head`, an ingress, and probes
+wired to `/livez` (liveness) and `/health` (readiness) from item 7. Grace periods are asymmetric on
+purpose: 120s for the API so in-flight SSE answers drain, 960s for the worker so a 200-page parse
+is not killed mid-job. `existingSecret` is the production path, so nothing has to land in
+`values.yaml` or in Helm release history. Postgres, Redis and the object store are deliberately not
+in the chart -- they are managed services, not workloads this chart should own.
+
+`.github/workflows/ci.yml` runs five jobs: `backend` (ruff, `mypy src`, migrations, `pytest
+--cov-fail-under=65` against a real Postgres, Redis and SeaweedFS), `frontend` (oxlint, vite
+build), `audit` (pip-audit, Trivy filesystem scan), `chart` (helm lint and template), and `images`
+(buildx build of both images with a GHA cache, then a Trivy image scan of each).
+
+Making the gates real needed code changes. `ruff.toml` selects `E,F,I,B,C4,SIM,T20`; the eleven
+findings are fixed -- six `zip()` calls gained `strict=True`, which turns a silent truncation into
+a loud error on genuinely equal-length pairs, plus a lambda assignment and import ordering. `mypy
+src` had eight pre-existing errors and is now clean: `_retry_transient` proves its return by
+running the final attempt outside the loop, `_PROVIDERS` is typed as a factory map, the Groq client
+handle is `Any` because the SDK's overloads do not cover `stream_options`, and three `Any` returns
+are annotated at their source. Coverage is 70% today against a 65% floor.
+
+Building it surfaced four real defects, all fixed. The PyPI `torchvision` that docling pulls in
+transitively does not register its ops against a CPU-index `torch`, so every `transformers` import
+died on `operator torchvision::nms does not exist` -- both must come from the CPU index, in the
+image and on a developer's machine. The base image's pip 23.0.1 mis-normalizes package names on
+that index and tries to build `typing_extensions` from source. opencv, also via docling, links
+against the X client libraries even headless. And the object store's compose healthcheck had been
+failing since it was written -- the S3 root answers `403` unauthenticated and `localhost` resolves
+to `::1`, which the listener is not bound to; nothing noticed because nothing depended on it being
+healthy until `api` and `worker` did.
+
+Verified end to end against the containerized stack: register, upload, worker ingest (24 chunks
+indexed), retrieval, rerank, and a generated answer at High confidence with citations -- all
+through the SPA's own origin on :8080, with the embedder and reranker loading from the baked cache
+rather than the network. The frontend re-resolves the API per request off the container's own
+nameservers, so recreating the API container does not 502 the SPA until nginx restarts; verified
+by recreating it.
+
+Not done: `mypy --strict` (the repo runs the non-strict profile, and `tests/` still has 12 errors,
+so CI type-checks `src` only), `UP`/pyupgrade in ruff (a repo-wide `Optional[X]` rewrite belongs in
+its own commit), a GPU node pool, Terraform, image signing and SBOM (item 16), and eval gating
+(item 17 -- CI runs the test suite, not `evaluation/run_eval.py`).
 
 ### 7. `/health` is unsafe as a probe — **DONE**
 `check_health` (`src/core/health.py`) instantiates a **second** `Embedder()` and a fresh LLM client
@@ -317,11 +374,11 @@ streams, 12-factor compliance throughout.
 2. ~~**pgvector or Qdrant** — retire embedded Chroma and in-memory BM25~~ **done** (pgvector)
 3. ~~**Async ingest workers** — get parsing off the request path~~ **done** (arq)
 4. ~~**Auth + tenancy** — with the cross-tenant isolation test~~ **done** (local JWT)
-5. **Docker + CI + Helm** — reproducible deploys
+5. ~~**Docker + CI + Helm** — reproducible deploys~~ **done**
 6. **OpenTelemetry + Prometheus + Langfuse** — so it can be seen
 7. **Eval gating in CI** — so quality cannot silently regress
 8. **TEI inference service**, then retrieval-quality work against gated evals
 
-Steps 1-5 turn this from a prototype into a service. 6-7 let a team own it. 8 and the P2 list are
+Steps 1-5 turn this from a prototype into a service, and are done. 6-7 let a team own it. 8 and the P2 list are
 where ML differentiation compounds — and they are only safe after 7, because without gated evals
 every retrieval change is a coin flip.

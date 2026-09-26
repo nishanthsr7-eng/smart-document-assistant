@@ -3,7 +3,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from src.core.config import SETTINGS
 from src.core.errors import (
@@ -50,7 +50,7 @@ class FigureCaptioner:
         from transformers import BlipForConditionalGeneration, BlipProcessor
 
         name = SETTINGS.models.blip_name
-        self._processor = BlipProcessor.from_pretrained(name)
+        self._processor: Any = BlipProcessor.from_pretrained(name)
         self._model = BlipForConditionalGeneration.from_pretrained(name)
         self._model.eval()
 
@@ -60,7 +60,8 @@ class FigureCaptioner:
         inputs = self._processor(image.convert("RGB"), return_tensors="pt")
         with torch.no_grad():
             out = self._model.generate(**inputs, max_new_tokens=40)
-        return self._processor.decode(out[0], skip_special_tokens=True).strip()
+        caption: str = self._processor.decode(out[0], skip_special_tokens=True)
+        return caption.strip()
 
 
 def parse(extension: str, data: bytes, captioner: Optional[FigureCaptioner] = None) -> list[Element]:
@@ -268,7 +269,7 @@ def _linearise_table(item, doc) -> str:
     columns = [str(c) for c in frame.columns]
     rows = []
     for _, row in frame.iterrows():
-        cells = [f"{col}: {row[orig]}" for col, orig in zip(columns, frame.columns) if str(row[orig]).strip()]
+        cells = [f"{col}: {row[orig]}" for col, orig in zip(columns, frame.columns, strict=True) if str(row[orig]).strip()]
         if cells:
             rows.append("; ".join(cells))
     return "\n".join(rows)

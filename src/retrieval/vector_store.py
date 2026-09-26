@@ -35,7 +35,7 @@ class VectorStore:
             return
         rows = [
             {**_row(child, i, tenant_id), "embedding": embedding}
-            for i, (child, embedding) in enumerate(zip(children, embeddings))
+            for i, (child, embedding) in enumerate(zip(children, embeddings, strict=True))
         ]
         with session() as sess:
             stmt = insert(Chunk).values(rows)

@@ -16,8 +16,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from src.api import deps
 from src.api.schemas import (
     AuditEventOut,
-    ConfigResponse,
     ConfidenceOut,
+    ConfigResponse,
     ConflictOut,
     CreateUserRequest,
     DocumentOut,

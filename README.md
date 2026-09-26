@@ -141,8 +141,9 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows
 # source .venv/bin/activate   # Linux/Mac
 
-# 2. Install CPU-only PyTorch (avoids pulling a ~2GB CUDA build)
-pip install torch --index-url https://download.pytorch.org/whl/cpu
+# 2. Install CPU-only PyTorch (avoids pulling a ~2GB CUDA build). torchvision from the same
+#    index: docling pulls it in, and PyPI's build fails to register its ops against a CPU torch.
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
 # 3. Install dependencies
 pip install -r requirements.txt
@@ -184,6 +185,62 @@ ollama serve
 The app opens at `http://localhost:5173`. Create a workspace on the sign-in screen (the first user
 of a workspace is its admin), then upload a PDF or TXT file, wait for indexing, and ask a question.
 
+### Running in containers
+
+The dev loop above keeps the code on the host. To run the whole thing in containers instead:
+
+```bash
+docker compose --profile app up -d --build
+```
+
+That builds two images from `docker/`, applies migrations as a one-shot `migrate` service, then
+starts the API, the ingest worker and an nginx-served SPA on `http://localhost:8080`. The API and
+the worker are the *same* image with a different entrypoint argument (`api` / `worker` /
+`migrate`), so they cannot drift apart on dependencies.
+
+The backend image bakes the model weights in: bge, mxbai, BLIP and the docling artifacts are
+~1.5 GB, and pulling them at boot would mean minutes of downloading before a fresh replica is
+ready. `HF_HUB_OFFLINE=1` in the image makes a missed bake fail loudly instead of silently
+reaching for HuggingFace at runtime. The first build is therefore slow; layers cache afterwards.
+
+Both images run as a non-root user with a read-only root filesystem.
+
+### Deploying to Kubernetes
+
+`deploy/helm/sda` is a Helm chart for the three workloads. Postgres, Redis and the object store
+are not in the chart -- point at managed services through `config` and `secrets`:
+
+```bash
+helm upgrade --install sda deploy/helm/sda   --set ingress.host=sda.example.com   --set existingSecret=sda-secrets
+```
+
+- API and worker scale independently: the API is IO-bound, the worker is CPU-bound and holds
+  model weights through a parse. Separate deployments, resource envelopes, HPAs and PDBs.
+- `alembic upgrade head` runs as a `pre-install,pre-upgrade` hook Job, so the schema is never
+  behind the code that reads it.
+- Probes match what item 7 of the gap analysis rebuilt: `/livez` for liveness (static),
+  `/health` for readiness (backend pings, memoized, no model construction and no provider call).
+- The worker's grace period is 16 minutes -- long enough that a 200-page parse is not torn out
+  from under the job -- and the API's is 2 minutes so in-flight SSE answers drain.
+- `existingSecret` is the production path: point at a Secret written by an external secrets
+  operator so nothing lands in `values.yaml` or in Helm release history.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+| Job | Gates on |
+|---|---|
+| `backend` | `ruff check`, `mypy src`, `alembic upgrade head`, `pytest --cov-fail-under=65` against real Postgres/Redis/SeaweedFS |
+| `frontend` | `oxlint`, `vite build` |
+| `audit` | `pip-audit` on `requirements.txt`, Trivy filesystem scan (HIGH/CRITICAL) |
+| `chart` | `helm lint` and `helm template` |
+| `images` | Builds both images with buildx cache, then Trivy-scans each |
+
+`ruff.toml` selects `E,F,I,B,C4,SIM,T20`. `UP` (pyupgrade) is deliberately excluded for now:
+turning it on would make this a repo-wide `Optional[X]` to `X | None` rewrite, which belongs in
+its own commit.
+
 ### Accounts and tenancy
 
 Documents, chunks, answers and the audit log are scoped to a workspace (tenant). A caller's tenant
@@ -221,6 +278,8 @@ delete, job read or cache entry crosses a workspace boundary.
 | `DB_POOL_SIZE` / `DB_POOL_MAX_OVERFLOW` | `5` / `10` | SQLAlchemy connection pool sizing |
 | `JWT_SECRET` | _(required)_ | HS256 signing key for access tokens |
 | `ACCESS_TOKEN_TTL_S` | `43200` | Access token lifetime in seconds |
+| `INGEST_CONCURRENCY` | `1` | Ingest jobs in flight per worker process (CPU-bound; keep low) |
+| `API_WORKERS` | `4` | uvicorn workers per API container; container images only |
 | `HF_TOKEN` | _(empty)_ | Optional; only needed for gated HF models or to avoid anonymous rate limits on embedder/reranker downloads |
 
 ### Running Tests

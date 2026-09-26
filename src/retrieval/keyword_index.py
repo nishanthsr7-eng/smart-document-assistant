@@ -2,9 +2,9 @@ import re
 
 from sqlalchemy import func, select
 
+from src.retrieval.vector_store import Hit, to_hit
 from src.storage.db import session
 from src.storage.models import Chunk
-from src.retrieval.vector_store import Hit, to_hit
 
 _STOPWORDS = {
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",

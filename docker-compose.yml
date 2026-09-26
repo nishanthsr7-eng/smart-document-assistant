@@ -37,10 +37,99 @@ services:
       - objectdata:/data
       - ./docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://localhost:8333/ >/dev/null 2>&1 || exit 1"]
+      # /status over IPv4: the S3 root answers 403 without credentials, and "localhost"
+      # resolves to ::1, which the S3 listener is not bound to.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8333/status"]
       interval: 5s
       timeout: 3s
       retries: 20
+
+  # The application itself. Held behind a profile so the documented dev loop
+  # (`docker compose up -d` for shared state, code on the host) is unchanged.
+  # Whole stack in containers: `docker compose --profile app up -d --build`.
+  migrate:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    image: sda-backend:dev
+    command: ["migrate"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: false
+    environment: &backend_env
+      DATABASE_URL: postgresql+psycopg://sda:sda@postgres:5432/sda
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: http://objectstore:8333
+      S3_BUCKET: sda-documents
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      # LLM_PROVIDER=ollama only: the server runs on the host, not in this network.
+      OLLAMA_HOST: host.docker.internal:11435
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    profiles: ["app"]
+    image: sda-backend:dev
+    command: ["api"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *backend_env
+      API_WORKERS: "4"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/livez')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      objectstore:
+        condition: service_healthy
+
+  worker:
+    profiles: ["app"]
+    image: sda-backend:dev
+    command: ["worker"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *backend_env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      objectstore:
+        condition: service_healthy
+
+  frontend:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    image: sda-frontend:dev
+    environment:
+      API_UPSTREAM: api:8000
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api
 
 volumes:
   pgdata:

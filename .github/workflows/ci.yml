@@ -1,0 +1,156 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.10"
+  TORCH_VERSION: "2.14.0"
+  TORCHVISION_VERSION: "0.29.0"
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: sda
+          POSTGRES_PASSWORD: sda
+          POSTGRES_DB: sda
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sda"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://sda:sda@127.0.0.1:5433/sda
+      REDIS_URL: redis://127.0.0.1:6380/0
+      S3_ENDPOINT: http://127.0.0.1:9002
+      S3_BUCKET: sda-documents
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      JWT_SECRET: ci-only-not-a-real-secret
+      LLM_PROVIDER: ollama
+    steps:
+      - uses: actions/checkout@v5
+
+      # SeaweedFS needs a mounted identities file, which service containers cannot provide.
+      - name: Start object store
+        run: |
+          docker run -d --name objectstore -p 9002:8333 \
+            -v "$PWD/docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro" \
+            chrislusf/seaweedfs:latest \
+            server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:9002/ >/dev/null && exit 0
+            sleep 2
+          done
+          docker logs objectstore
+          exit 1
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
+          pip install -r requirements-dev.txt
+
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            data/models
+          key: models-${{ hashFiles('src/core/config.py') }}
+
+      - run: ruff check .
+      - run: mypy src
+      - run: alembic upgrade head
+      - run: pytest -q --cov=src --cov-report=term-missing --cov-fail-under=65
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install pip-audit==2.9.0
+      # torch resolves from the CPU index, which pip-audit does not query.
+      - run: pip-audit -r requirements.txt --index-url https://pypi.org/simple --strict
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: azure/setup-helm@v4
+      - run: helm lint deploy/helm/sda --set secrets.JWT_SECRET=lint
+      - run: helm template sda deploy/helm/sda --set secrets.JWT_SECRET=lint > /dev/null
+
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            dockerfile: docker/backend.Dockerfile
+          - name: frontend
+            dockerfile: docker/frontend.Dockerfile
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          tags: sda-${{ matrix.name }}:${{ github.sha }}
+          load: true
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - name: Scan ${{ matrix.name }} image
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: sda-${{ matrix.name }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

@@ -1,0 +1,41 @@
+# The SPA and the API share an origin: /api is proxied to the backend, so there is no CORS
+# preflight in a deployed environment and no API hostname baked into the bundle.
+server {
+    listen 8080;
+    server_name _;
+
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy no-referrer always;
+
+    client_max_body_size 25m;
+
+    location /healthz {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+    location /api/ {
+        # Resolve the upstream per request rather than once at startup, so a recreated API
+        # container on a new address does not 502 until nginx is restarted. The image's
+        # 15-local-resolvers entrypoint script fills NGINX_LOCAL_RESOLVERS from the container's
+        # own /etc/resolv.conf, which is Docker's embedded DNS here and kube-dns in Kubernetes.
+        resolver ${NGINX_LOCAL_RESOLVERS} ipv6=off valid=10s;
+        set $api_upstream ${API_UPSTREAM};
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass http://$api_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Answer and ingest progress are SSE: no buffering, no read timeout.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+    }
+
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+    }
+}

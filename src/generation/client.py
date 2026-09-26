@@ -1,7 +1,7 @@
 import random
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterator, Protocol, TypeVar
+from typing import Any, Callable, Iterator, Protocol, TypeVar
 
 import httpx
 
@@ -14,14 +14,14 @@ _MAX_RETRIES = 4
 
 
 def _retry_transient(call: Callable[[], _T], status_of: Callable[[Exception], int | None]) -> _T:
-    for attempt in range(_MAX_RETRIES + 1):
+    for attempt in range(_MAX_RETRIES):
         try:
             return call()
         except Exception as exc:
-            status = status_of(exc)
-            if status not in _TRANSIENT_STATUS or attempt == _MAX_RETRIES:
+            if status_of(exc) not in _TRANSIENT_STATUS:
                 raise
             time.sleep(2**attempt + random.uniform(0, 1))
+    return call()
 
 
 @dataclass
@@ -186,7 +186,7 @@ class GroqProvider:
         if not key:
             raise ModelUnavailable("GROQ_API_KEY is not set. Add it to .env or switch LLM_PROVIDER.")
         self.model = SETTINGS.models.groq_model
-        self._client = Groq(api_key=key)
+        self._client: Any = Groq(api_key=key)
         self.last_usage = (0, 0)
 
     def stream(self, system: str, user: str) -> Iterator[str]:
@@ -243,7 +243,7 @@ class GroqProvider:
             raise ModelUnavailable("GROQ_API_KEY is not set.")
 
 
-_PROVIDERS = {
+_PROVIDERS: dict[str, Callable[[], Provider]] = {
     "ollama": OllamaProvider,
     "gemini": GeminiProvider,
     "groq": GroqProvider,
@@ -259,5 +259,5 @@ def build_client() -> Provider:
     return _PROVIDERS[name]()
 
 
-def _messages(system: str, user: str) -> list[dict]:
+def _messages(system: str, user: str) -> list[Any]:
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]

@@ -1,5 +1,7 @@
-# Install CPU-only torch first to avoid pulling a CUDA build:
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Install CPU-only torch and torchvision first to avoid pulling a CUDA build. Both, from the
+# same index: docling pulls torchvision transitively, and PyPI's build does not register its
+# ops against a CPU torch ("operator torchvision::nms does not exist" at import).
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 # then: pip install -r requirements.txt
 
 ollama==0.6.2
