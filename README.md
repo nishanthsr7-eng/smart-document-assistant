@@ -83,7 +83,7 @@ frontend/                Presentation layer (React SPA)
 src/                     Business logic (UI-agnostic, testable)
   api/                   FastAPI REST layer
   auth/                  Principal, password hashing, JWT, user service, audit log
-  core/                  Config, errors, tracing
+  core/                  Config, errors, tracing, metrics, structured logs, OTel setup
   ingestion/             Parse -> chunk -> index pipeline
   retrieval/             Embedder, pgvector store, tsvector lexical index, hybrid search, reranker
   generation/            LLM client, prompt templates, answer orchestration
@@ -91,7 +91,9 @@ src/                     Business logic (UI-agnostic, testable)
   storage/               Postgres engine/session, ORM models, object store, Redis cache and locks
 
 migrations/              Alembic schema migrations
-docker-compose.yml       Postgres (pgvector), Redis, object store
+docker-compose.yml       Postgres (pgvector), Redis, object store; app and obs profiles
+deploy/observability/    Prometheus scrape config, Grafana datasources and dashboard
+deploy/helm/sda/         Helm chart (API, worker, frontend, migrations, ServiceMonitor, alerts)
 
 evaluation/              Golden set (33 items) + metrics runner
 data/sample_docs/        Three real public-domain U.S. government documents
@@ -241,6 +243,32 @@ helm upgrade --install sda deploy/helm/sda   --set ingress.host=sda.example.com 
 turning it on would make this a repo-wide `Optional[X]` to `X | None` rewrite, which belongs in
 its own commit.
 
+### Observability
+
+Every exporter is opt-in: with nothing configured the processes still record spans and serve
+metrics, they just ship nothing outward. Bring up a local stack and point the app at it:
+
+```bash
+docker compose --profile obs up -d
+```
+
+Jaeger on http://localhost:16686, Prometheus on http://localhost:9090, Grafana (anonymous admin)
+on http://localhost:3001 with the **SDA overview** dashboard already provisioned. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318` in `.env` and restart the API and worker.
+
+| Signal | Where |
+|---|---|
+| Traces | One span tree per request: `POST /query` -> `answer` -> `searching` / `reranking` / `assembling` / `generating`, with SQL spans nested inside the stage that issued them. The ingest worker emits its own `ingest` trace. |
+| Metrics | `GET /metrics` on the API (aggregated across its uvicorn workers), port 9100 on the worker. Stage and answer latency, abstain rate, confidence distribution, citation validity, retrieval top score, tokens and USD spend per model, cache hit rate, ingest outcomes and queue depth. |
+| Logs | JSON on stdout, every line carrying `request_id`, `query_id`, `tenant_id` (or `job_id`/`doc_id` in the worker) plus `trace_id` and `span_id`, so a log line and its span find each other. |
+| Prompt traces | Langfuse reads the same span tree: set `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` and each query arrives with its prompt, retrieved context, usage and cost. |
+| Exceptions | `SENTRY_DSN`, if set. |
+| Alerts | `deploy/helm/sda/files/alerts.yml`, loaded by the compose Prometheus and rendered as a `PrometheusRule` by the chart -- one file, both paths. |
+
+The two alerts worth naming: citation validity below 90% and an abstain rate over 40%. Neither
+shows up in an HTTP error rate, because a confidently wrong answer and a service that abstains on
+everything both return 200.
+
 ### Accounts and tenancy
 
 Documents, chunks, answers and the audit log are scoped to a workspace (tenant). A caller's tenant
@@ -280,6 +308,17 @@ delete, job read or cache entry crosses a workspace boundary.
 | `ACCESS_TOKEN_TTL_S` | `43200` | Access token lifetime in seconds |
 | `INGEST_CONCURRENCY` | `1` | Ingest jobs in flight per worker process (CPU-bound; keep low) |
 | `API_WORKERS` | `4` | uvicorn workers per API container; container images only |
+| `DEPLOY_ENV` | `development` | Environment label on spans, metrics and Sentry events |
+| `LOG_JSON` / `LOG_LEVEL` | `1` / `INFO` | JSON logs (`0` for the console renderer) and level |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(empty)_ | OTLP/HTTP base URL, e.g. `http://127.0.0.1:4318`; empty disables trace export |
+| `OTEL_TRACE_SAMPLE_RATIO` | `1.0` | Head sampling ratio, parent-based |
+| `OTEL_DB_SPANS` | `1` | Emit a span per SQL statement |
+| `METRICS_TOKEN` | _(empty)_ | Bearer token for `GET /metrics`; empty leaves the scrape endpoint open |
+| `WORKER_METRICS_PORT` | `9100` | Port the ingest worker serves `/metrics` on |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | _(empty)_ | Enable Langfuse prompt traces |
+| `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Langfuse endpoint |
+| `SENTRY_DSN` | _(empty)_ | Enable Sentry error reporting |
+| `MODEL_PRICING_JSON` | _(empty)_ | Override generation pricing without a deploy: `{"model": [usd_per_mtok_in, usd_per_mtok_out]}` |
 | `HF_TOKEN` | _(empty)_ | Optional; only needed for gated HF models or to avoid anonymous rate limits on embedder/reranker downloads |
 
 ### Running Tests

@@ -1,6 +1,7 @@
 import hashlib
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -76,6 +77,51 @@ class AuthConfig:
     min_password_chars: int = 10
     roles: tuple[str, ...] = ("viewer", "editor", "admin")
     audit_page_size: int = 100
+
+
+# USD per million tokens, (prompt, completion). A model that is not listed costs 0 rather than
+# a guess: a wrong number on a cost dashboard is worse than a visibly absent one.
+_DEFAULT_PRICING: dict[str, tuple[float, float]] = {
+    "gemini-3.6-flash": (0.30, 2.50),
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-pro": (1.25, 10.00),
+    "llama-3.3-70b-versatile": (0.59, 0.79),
+}
+
+
+def _pricing() -> dict[str, tuple[float, float]]:
+    raw = os.environ.get("MODEL_PRICING_JSON", "")
+    if not raw:
+        return dict(_DEFAULT_PRICING)
+    return {model: (float(prompt), float(completion)) for model, (prompt, completion) in json.loads(raw).items()}
+
+
+@dataclass(frozen=True)
+class ObservabilityConfig:
+    """Traces, metrics and logs. Every exporter is opt-in by env: with nothing set the process
+    still records spans and metrics locally, it just ships them nowhere."""
+
+    service_name: str = os.environ.get("OTEL_SERVICE_NAME", "sda")
+    service_version: str = os.environ.get("SERVICE_VERSION", "1.0")
+    environment: str = os.environ.get("DEPLOY_ENV", "development")
+    # OTLP/HTTP base URL, e.g. http://otel-collector:4318 or http://jaeger:4318.
+    otlp_endpoint: str = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    trace_sample_ratio: float = float(os.environ.get("OTEL_TRACE_SAMPLE_RATIO", "1.0"))
+    db_spans: bool = os.environ.get("OTEL_DB_SPANS", "1") != "0"
+    # The worker has no HTTP server of its own, so it exposes /metrics on this port.
+    worker_metrics_port: int = int(os.environ.get("WORKER_METRICS_PORT", "9100"))
+    # Optional bearer token for /metrics. Unset means the endpoint is open, which is the norm
+    # for a cluster-internal scrape target; it carries no tenant data either way.
+    metrics_token: str = os.environ.get("METRICS_TOKEN", "")
+    langfuse_public_key: str = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+    langfuse_secret_key: str = os.environ.get("LANGFUSE_SECRET_KEY", "")
+    langfuse_host: str = os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com")
+    langfuse_sample_rate: float = float(os.environ.get("LANGFUSE_SAMPLE_RATE", "1.0"))
+    sentry_dsn: str = os.environ.get("SENTRY_DSN", "")
+    sentry_traces_sample_rate: float = float(os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.0"))
+    log_json: bool = os.environ.get("LOG_JSON", "1") != "0"
+    log_level: str = os.environ.get("LOG_LEVEL", "INFO").upper()
+    pricing: dict[str, tuple[float, float]] = field(default_factory=_pricing)
 
 
 @dataclass(frozen=True)
@@ -156,6 +202,7 @@ class Settings:
     storage: StorageConfig
     jobs: JobsConfig
     auth: AuthConfig
+    observability: ObservabilityConfig
     models: ModelConfig
     ingestion: IngestionConfig
     retrieval: RetrievalConfig
@@ -178,6 +225,7 @@ def _build_settings() -> Settings:
         storage=StorageConfig(),
         jobs=JobsConfig(),
         auth=AuthConfig(),
+        observability=ObservabilityConfig(),
         models=models,
         ingestion=ingestion,
         retrieval=RetrievalConfig(),

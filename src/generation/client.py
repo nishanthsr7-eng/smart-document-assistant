@@ -5,6 +5,7 @@ from typing import Any, Callable, Iterator, Protocol, TypeVar
 
 import httpx
 
+from src.core import metrics
 from src.core.config import SETTINGS
 from src.core.errors import GenerationError, ModelUnavailable
 
@@ -29,6 +30,17 @@ class Completion:
     text: str
     prompt_tokens: int
     completion_tokens: int
+
+
+def _completed(provider: str, model: str, text: str, prompt: int, completion: int) -> Completion:
+    """Every provider call is metered here, not at the call sites: query condensing, expansion
+    and follow-up suggestions spend tokens too, and a cost dashboard that missed them would lie."""
+    metrics.record_tokens(provider, model, prompt, completion)
+    return Completion(text, prompt, completion)
+
+
+def _record_stream(provider: str, model: str, usage: tuple[int, int]) -> None:
+    metrics.record_tokens(provider, model, usage[0], usage[1])
 
 
 class Provider(Protocol):
@@ -73,6 +85,7 @@ class OllamaProvider:
             raise ModelUnavailable(
                 f"Lost the connection to Ollama at {SETTINGS.models.ollama_host}."
             ) from exc
+        _record_stream(self.name, self.model, self.last_usage)
 
     def generate(self, system: str, user: str) -> Completion:
         cfg = SETTINGS.generation
@@ -88,7 +101,9 @@ class OllamaProvider:
             raise ModelUnavailable(
                 f"Lost the connection to Ollama at {SETTINGS.models.ollama_host}."
             ) from exc
-        return Completion(
+        return _completed(
+            self.name,
+            self.model,
             res["message"]["content"],
             res.get("prompt_eval_count", 0),
             res.get("eval_count", 0),
@@ -148,6 +163,7 @@ class GeminiProvider:
                     yield chunk.text
         except Exception as exc:
             raise GenerationError(f"Gemini request failed: {exc}") from exc
+        _record_stream(self.name, self.model, self.last_usage)
 
     def generate(self, system: str, user: str) -> Completion:
         from google.genai import errors
@@ -165,7 +181,9 @@ class GeminiProvider:
         except Exception as exc:
             raise GenerationError(f"Gemini request failed: {exc}") from exc
         usage = res.usage_metadata
-        return Completion(
+        return _completed(
+            self.name,
+            self.model,
             res.text or "",
             getattr(usage, "prompt_token_count", 0) or 0,
             getattr(usage, "candidates_token_count", 0) or 0,
@@ -210,6 +228,7 @@ class GroqProvider:
                     yield chunk
         except Exception as exc:
             raise GenerationError(f"Groq request failed: {exc}") from exc
+        _record_stream(self.name, self.model, self.last_usage)
 
     def generate(self, system: str, user: str) -> Completion:
         import groq
@@ -232,7 +251,9 @@ class GroqProvider:
         except Exception as exc:
             raise GenerationError(f"Groq request failed: {exc}") from exc
         usage = res.usage
-        return Completion(
+        return _completed(
+            self.name,
+            self.model,
             res.choices[0].message.content or "",
             getattr(usage, "prompt_tokens", 0) or 0,
             getattr(usage, "completion_tokens", 0) or 0,

@@ -52,6 +52,24 @@ frontend:
     requests: {cpu: "10m", memory: 32Mi}
     limits: {cpu: "200m", memory: 128Mi}
 
+# Traces, metrics, logs. Nothing here is required: with no OTLP endpoint and no Langfuse keys the
+# pods still record spans and serve /metrics, they just ship nothing outward.
+observability:
+  otlpEndpoint: ""            # e.g. http://opentelemetry-collector.observability:4318
+  traceSampleRatio: "1.0"
+  logJson: true
+  serviceMonitor:
+    enabled: false            # needs the Prometheus Operator CRDs
+    interval: 30s
+    labels: {}
+  prometheusRule:
+    enabled: false
+    labels: {}
+  # Secret holding METRICS_TOKEN, when /metrics should not be open inside the cluster.
+  metricsTokenSecret: ""
+  # Scrape annotations for a Prometheus that discovers pods rather than ServiceMonitors.
+  podAnnotations: false
+
 migrations:
   enabled: true    # pre-install/pre-upgrade Job running `alembic upgrade head`
 
@@ -75,6 +93,9 @@ config:
   S3_REGION: us-east-1
   LLM_PROVIDER: gemini
   GEMINI_MODEL: gemini-3.6-flash
+  DEPLOY_ENV: production
+  LOG_LEVEL: INFO
+  OTEL_SERVICE_NAME: sda
   DB_POOL_SIZE: "5"
   DB_POOL_MAX_OVERFLOW: "10"
   ACCESS_TOKEN_TTL_S: "43200"
@@ -85,6 +106,9 @@ existingSecret: ""
 secrets: {}
   # JWT_SECRET: ""
   # GEMINI_API_KEY: ""
+  # LANGFUSE_PUBLIC_KEY: ""
+  # LANGFUSE_SECRET_KEY: ""
+  # SENTRY_DSN: ""
   # S3_ACCESS_KEY: ""
   # S3_SECRET_KEY: ""
 

@@ -8,3 +8,6 @@ data:
   {{ $key }}: {{ $value | quote }}
   {{- end }}
   INGEST_CONCURRENCY: {{ .Values.worker.concurrency | quote }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.observability.otlpEndpoint | quote }}
+  OTEL_TRACE_SAMPLE_RATIO: {{ .Values.observability.traceSampleRatio | quote }}
+  LOG_JSON: {{ ternary "1" "0" .Values.observability.logJson | quote }}

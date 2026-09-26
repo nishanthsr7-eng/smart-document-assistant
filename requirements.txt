@@ -33,5 +33,17 @@ pyjwt==2.15.0
 # Ingest job queue: parsing and embedding run in a worker, not on the request path.
 arq==0.28.0
 
+# Observability: OTel spans over OTLP/HTTP, Prometheus metrics, JSON logs, Langfuse prompt
+# traces (Langfuse 3+ rides on the same tracer provider), Sentry for exceptions. The
+# opentelemetry-instrumentation-* packages are deliberately absent: spans are created explicitly
+# in src/core/tracing.py and src/core/otel.py.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+prometheus-client==0.26.0
+structlog==26.1.0
+langfuse==4.15.6
+sentry-sdk==2.70.0
+
 # Tests only, not imported at runtime:
 pytest==9.1.1

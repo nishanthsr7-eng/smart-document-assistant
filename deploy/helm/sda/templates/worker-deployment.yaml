@@ -20,6 +20,11 @@ spec:
         app.kubernetes.io/component: worker
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if $.Values.observability.podAnnotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9100"
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
@@ -33,6 +38,9 @@ spec:
           args: ["worker"]
           securityContext: {{- include "sda.containerSecurityContext" . | nindent 12 }}
           {{- include "sda.backendEnv" . | nindent 10 }}
+          ports:
+            - name: metrics
+              containerPort: 9100
           # arq writes a heartbeat key; a worker that stops consuming stops refreshing it.
           livenessProbe:
             exec:

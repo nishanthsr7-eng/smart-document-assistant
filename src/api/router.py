@@ -1,17 +1,20 @@
 import asyncio
+import contextvars
 import json
-import logging
 import queue
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
 import anyio
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from opentelemetry.propagate import extract
+from opentelemetry.trace import SpanKind
 
 from src.api import deps
 from src.api.schemas import (
@@ -35,6 +38,7 @@ from src.api.schemas import (
 from src.auth import audit, service
 from src.auth.principal import Principal
 from src.auth.tokens import issue_access_token
+from src.core import logs, metrics, observability, otel
 from src.core.config import SETTINGS
 from src.core.errors import (
     AuthError,
@@ -51,14 +55,18 @@ from src.ingestion.parsers import validate_upload
 from src.ingestion.pipeline import delete, doc_id_for, list_indexed, scope_doc_ids
 from src.storage import objects
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+observability.setup("api")
+logger = logs.logger(__name__)
+
+# Probes and scrapes run every few seconds and carry no query: a span each would be noise.
+_UNTRACED_PATHS = frozenset({"/livez", "/metrics"})
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
     await jobs.close_pool()
+    observability.shutdown()
 
 
 app = FastAPI(title="Smart Document Assistant", version="1.0", lifespan=lifespan)
@@ -70,6 +78,47 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _observe_request(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    """One server span, one metric pair and one correlation id per request."""
+    if request.url.path in _UNTRACED_PATHS:
+        return await call_next(request)
+
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:16]
+    started = time.perf_counter()
+    # A gateway's traceparent is honoured, so the API span joins the caller's trace.
+    with otel.tracer().start_as_current_span(
+        request.method, context=extract(dict(request.headers)), kind=SpanKind.SERVER
+    ) as span:
+        logs.bind(request_id=request_id)
+        span.set_attribute("sda.request_id", request_id)
+        span.set_attribute("http.request.method", request.method)
+        try:
+            response = await call_next(request)
+        except Exception:
+            _record_request(span, request, "500", time.perf_counter() - started)
+            raise
+        finally:
+            logs.unbind("request_id")
+        _record_request(span, request, str(response.status_code), time.perf_counter() - started)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+def _record_request(span, request: Request, status: str, elapsed: float) -> None:
+    # The route template, not the URL: /jobs/{job_id} is one series, not one per job. Only
+    # available after routing, hence the rename here rather than at span start. A streaming
+    # response is already dispatched at this point, so its body time is not in `elapsed`.
+    route = getattr(request.scope.get("route"), "path", "unmatched")
+    span.update_name(f"{request.method} {route}")
+    span.set_attribute("http.route", route)
+    span.set_attribute("http.response.status_code", status)
+    metrics.HTTP_REQUESTS.labels(request.method, route, status).inc()
+    metrics.HTTP_DURATION.labels(request.method, route).observe(elapsed)
 
 
 @app.exception_handler(AuthError)
@@ -173,6 +222,19 @@ def livez() -> dict[str, str]:
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(**check_health())
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics(request: Request) -> Response:
+    """Scrape target. Carries no tenant data, so it is bearer-protected only when a token is set."""
+    token = SETTINGS.observability.metrics_token
+    if token and request.headers.get("authorization") != f"Bearer {token}":
+        raise HTTPException(status_code=401, detail="Invalid metrics token.")
+    depth = await anyio.to_thread.run_sync(jobs.queue_depth)
+    if depth is not None:
+        metrics.QUEUE_DEPTH.set(depth)
+    payload, content_type = metrics.render()
+    return Response(content=payload, media_type=content_type)
 
 
 @app.get("/config", response_model=ConfigResponse)
@@ -365,7 +427,10 @@ def _stream_answer(request: QueryRequest, doc_ids: list[str], principal: Princip
         finally:
             events.put(("__end__", {}))
 
-    threading.Thread(target=run, daemon=True).start()
+    # The answer runs off the event loop, and a bare thread starts with an empty context: the
+    # copy carries the request's span and its log bindings into the stage spans.
+    context = contextvars.copy_context()
+    threading.Thread(target=lambda: context.run(run), daemon=True).start()
 
     while True:
         event, data = events.get()

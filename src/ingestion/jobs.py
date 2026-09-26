@@ -3,6 +3,7 @@ import time
 from typing import Any, Optional, cast
 
 from arq.connections import ArqRedis, RedisSettings, create_pool
+from redis.exceptions import RedisError
 
 from src.auth.principal import Principal
 from src.core.config import SETTINGS
@@ -134,3 +135,12 @@ def dead_letters(tenant_id: str, limit: int = 50) -> list[dict]:
     items = cast(list[bytes], client().lrange(SETTINGS.jobs.dlq_key, 0, -1))
     entries = [json.loads(item) for item in items]
     return [e for e in entries if e.get("tenant_id") == tenant_id][:limit]
+
+
+def queue_depth() -> Optional[int]:
+    """Jobs waiting to be picked up. None when Redis is unreachable: a scrape must still return
+    the rest of the metrics, and an unreachable Redis is what /health is for."""
+    try:
+        return int(cast(int, client().zcard(SETTINGS.jobs.queue_name)))
+    except RedisError:
+        return None

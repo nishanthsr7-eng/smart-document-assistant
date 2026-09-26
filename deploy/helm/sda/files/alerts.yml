@@ -1,0 +1,66 @@
+groups:
+  - name: sda-slo
+    rules:
+      # Answer quality. These are the two that matter for a RAG service and neither shows up in
+      # an HTTP error rate: a wrong-but-confident answer and a service that abstains on everything
+      # both return 200.
+      - alert: CitationValidityBelowFloor
+        expr: |
+          sum(rate(sda_citation_checks_total{status="supported"}[30m]))
+            / sum(rate(sda_citation_checks_total{status=~"supported|unsupported"}[30m])) < 0.9
+        for: 30m
+        labels: {severity: critical}
+        annotations:
+          summary: "Under 90% of cited sentences verify against their source."
+          runbook: "Check the reranker handle and the grounding threshold; compare against the last eval run."
+
+      - alert: AbstainRateSpike
+        expr: |
+          sum(rate(sda_answers_total{status="abstained"}[15m])) / sum(rate(sda_answers_total[15m])) > 0.4
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Over 40% of questions abstain."
+          runbook: "Usually retrieval, not the gate: check embedder load, index freshness and sda_retrieval_top_score."
+
+      - alert: AnswerLatencyP95
+        expr: |
+          histogram_quantile(0.95, sum(rate(sda_answer_duration_seconds_bucket[10m])) by (le)) > 15
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 answer latency over 15s."
+          runbook: "Break down by sda_stage_duration_seconds to find the stage; generation and rerank are the usual two."
+
+      - alert: HttpServerErrors
+        expr: |
+          sum(rate(sda_http_requests_total{status=~"5.."}[5m])) / sum(rate(sda_http_requests_total[5m])) > 0.02
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Over 2% of requests are 5xx."
+
+      # max, not avg: every replica reports the same shared queue.
+      - alert: IngestQueueBacklog
+        expr: max(sda_ingest_queue_depth) > 25
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Ingest backlog is not draining."
+          runbook: "Scale the worker deployment; check sda_ingest_jobs_total{outcome=\"failed\"} and the dead-letter list."
+
+      - alert: IngestFailureRate
+        expr: |
+          sum(rate(sda_ingest_jobs_total{outcome="failed"}[30m])) / sum(rate(sda_ingest_jobs_total[30m])) > 0.1
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "Over 10% of ingests fail (parse or embed), not counting rejected uploads."
+
+      - alert: GenerationSpendBurn
+        expr: sum(rate(sda_llm_cost_usd_total[1h])) * 24 > 50
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "Generation spend is tracking above $50/day."
+          runbook: "No per-tenant budget is enforced yet (readiness item 11): check sda_answer_cache_total for a cache that stopped hitting."

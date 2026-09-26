@@ -242,7 +242,7 @@ structured-output retry. `_retry_transient` (`src/generation/client.py:16`) is c
 behind the router so all providers share it. Add prompt caching for the system prompt + repeated
 context.
 
-### 13. Observability is one `logging.basicConfig` and a hand-rolled `Trace`
+### 13. Observability is one `logging.basicConfig` and a hand-rolled `Trace` — **DONE**
 `src/core/tracing.py` is a nice design but only emits a log line. No metrics, no distributed traces,
 no error aggregation, no request correlation.
 
@@ -256,6 +256,80 @@ no error aggregation, no request correlation.
 - **Langfuse** or Arize Phoenix for prompt/response traces, cost attribution, and turning production
   traces into eval datasets. This is the layer that makes RAG debuggable in production and the
   biggest missing piece after persistence.
+
+**Done.** `src/core/` gained four modules behind one entrypoint: `observability.setup(role)` is
+called at import by the API and by the worker, and wires `logs` (structlog), `otel` (tracer
+provider and exporters), Sentry, and the SQL instrumentation. `metrics` needs no setup.
+
+`Trace` was the right abstraction already, so it became the instrumentation point rather than
+being replaced. `trace.root(...)` opens the span every stage hangs off; `trace.stage(...)` still
+returns the same payload dict the UI reads, and now also opens a child span, records
+`sda_stage_duration_seconds`, and copies its scalar payload onto the span. The waterfall this
+produces is the real one:
+
+```
+POST /query 0.03s
+  select documents 0.01s
+  insert audit_log 0.00s
+  answer 31.70s
+    searching 5.99s
+    reranking 18.30s
+    assembling 1.64s
+      select chunks 0.01s
+    generating 3.38s
+```
+
+Two things had to be fixed to get that shape. The answer runs in a thread the router spawns, and
+a bare thread starts with an empty context, so the whole tree would otherwise have been a second
+root; the router now copies the request context into it. Inside the answer, the dense and lexical
+searches run in a `ThreadPoolExecutor`, with the same problem one level down: `otel.TracedPool`
+copies the context per submission, which is why the SQL a pooled search issues lands under its
+stage instead of becoming twenty orphan traces. SQL spans come from SQLAlchemy's own
+`before_cursor_execute` / `handle_error` events rather than an instrumentation package: the
+`opentelemetry-instrumentation-*` family is not vendored here, and the pipeline stages -- the
+spans that actually matter -- were already explicit.
+
+Langfuse 3+ is itself an OTel consumer, so it attaches to the same tracer provider instead of
+running a second tracing stack. Spans are annotated with its attribute names
+(`langfuse.observation.input`, `.usage_details`, `.cost_details`), so the generation stage arrives
+as a typed generation with its prompt, tokens and cost, and the query arrives as the trace input.
+One span tree, three consumers: OTLP, Langfuse, and the local Jaeger.
+
+Metrics are defined in one place, `src/core/metrics.py`, because the dashboard and the alert rules
+are a contract. Beyond latency and HTTP, they are the RAG-specific ones: abstain rate and
+confidence distribution, citation validity (the verifier's verdicts as a counter), retrieval top
+score -- the abstain gate's own input, so an abstain spike can be traced to retrieval rather than
+to the gate -- answer cache hit rate, tokens and USD per model, ingest outcomes and queue depth.
+Token metering lives in the provider layer, not at the answer's generation call: query condensing,
+expansion and follow-up suggestions spend tokens too, and a cost dashboard that missed them would
+lie. A measured example: a single answer reported 1838 prompt tokens while the process counter
+moved by 2599.
+
+Under `uvicorn --workers 4` each worker holds its own counters, so the API runs prometheus_client
+in multiprocess mode (the entrypoint sets and clears `PROMETHEUS_MULTIPROC_DIR`) and one scrape
+returns the pod's totals. The ingest worker has no HTTP server, so it serves its own `/metrics` on
+9100. Stage names carry counts ("Searching 3 document(s)"), so the label is the first word;
+routes are labelled by template, not URL.
+
+Logs are JSON on stdout through structlog, with stdlib logging (uvicorn, SQLAlchemy, arq) routed
+into the same renderer, and `request_id` / `query_id` / `tenant_id` -- or `job_id` / `doc_id` in
+the worker -- bound as contextvars, plus `trace_id` and `span_id` on every line.
+
+`deploy/observability/` holds a Prometheus scrape config and a provisioned Grafana dashboard, and
+`docker compose --profile obs up -d` brings up Jaeger, Prometheus and Grafana for the dev loop.
+The seven alert rules live in `deploy/helm/sda/files/alerts.yml`, which both compose and the
+chart's `PrometheusRule` render, so an alert is written once. The chart also gained a
+ServiceMonitor, a metrics Service for the worker and optional scrape annotations.
+
+Verified end to end against the running stack: the waterfall above came out of Jaeger, Prometheus
+scrapes both processes and loads all seven rules, Grafana provisions the dashboard, and every
+metric family populates -- including cost, priced from config.
+
+Not done: OTel *metrics* and logs signals (metrics go to Prometheus directly, logs to stdout),
+the `opentelemetry-instrumentation-*` packages (so no automatic httpx or Redis spans), frontend
+Sentry with source maps, exemplars linking a metric bucket to a trace, and Langfuse's own
+evaluation loop (item 17). Grafana dashboards are provisioned but there is no Alertmanager route
+or on-call rotation behind the rules (item 23).
 
 ### 14. Config is read at class-definition time and never validated
 `ModelConfig` (`src/core/config.py:26`) evaluates `os.environ.get(...)` as **dataclass field
@@ -375,10 +449,10 @@ streams, 12-factor compliance throughout.
 3. ~~**Async ingest workers** — get parsing off the request path~~ **done** (arq)
 4. ~~**Auth + tenancy** — with the cross-tenant isolation test~~ **done** (local JWT)
 5. ~~**Docker + CI + Helm** — reproducible deploys~~ **done**
-6. **OpenTelemetry + Prometheus + Langfuse** — so it can be seen
+6. ~~**OpenTelemetry + Prometheus + Langfuse** — so it can be seen~~ **done**
 7. **Eval gating in CI** — so quality cannot silently regress
 8. **TEI inference service**, then retrieval-quality work against gated evals
 
-Steps 1-5 turn this from a prototype into a service, and are done. 6-7 let a team own it. 8 and the P2 list are
+Steps 1-6 turn this from a prototype into a service a team can see into, and are done. 7 is next. 8 and the P2 list are
 where ML differentiation compounds — and they are only safe after 7, because without gated evals
 every retrieval change is a coin flip.

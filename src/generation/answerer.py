@@ -1,13 +1,15 @@
 import hashlib
 import re
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from src.auth.principal import Principal
+from src.core import metrics
 from src.core.cache import ANSWER_CACHE
 from src.core.config import SETTINGS
 from src.core.errors import GenerationError, ModelUnavailable
+from src.core.otel import TracedPool
 from src.core.tokens import count_tokens
 from src.core.tracing import OnStage, Trace
 from src.generation.client import Provider
@@ -49,10 +51,23 @@ def _cache_key(
 
 
 def _finish(key: Optional[str], answer: "Answer") -> "Answer":
+    _observe(answer, answer.trace)
     answer.trace.log()
     if key is not None:
         ANSWER_CACHE.set(key, answer)
     return answer
+
+
+def _observe(answer: "Answer", trace: Trace, cached: bool = False) -> None:
+    trace.finish(
+        status=answer.status,
+        answer_text=answer.answer_text,
+        confidence_label=answer.confidence.label if answer.confidence else "none",
+        confidence_score=answer.confidence.score if answer.confidence else None,
+        citation_statuses=[s.citation_status for s in answer.sentences if s.cites],
+        abstain_reason=answer.abstain_reason,
+        cached=cached,
+    )
 
 
 @dataclass
@@ -124,7 +139,30 @@ def answer_question(
     history: Optional[list[tuple[str, str]]] = None,
     generate: bool = True,
 ) -> Answer:
-    trace = Trace()
+    trace = Trace(tenant_id=principal.tenant_id, user_id=principal.user_id)
+    with trace.root(question, mode, doc_ids, generate):
+        return _answer(
+            trace, question, doc_ids, embedder, store, client, keyword_index, reranker,
+            principal, mode, on_stage, on_token, history, generate,
+        )
+
+
+def _answer(
+    trace: Trace,
+    question: str,
+    doc_ids: list[str],
+    embedder: Embedder,
+    store: VectorStore,
+    client: Provider,
+    keyword_index: KeywordIndex,
+    reranker: Reranker,
+    principal: Principal,
+    mode: str,
+    on_stage: Optional[OnStage],
+    on_token: Optional[OnToken],
+    history: Optional[list[tuple[str, str]]],
+    generate: bool,
+) -> Answer:
     tenant_id = principal.tenant_id
 
     cache_key: Optional[str] = None
@@ -134,6 +172,7 @@ def answer_question(
         if cached is not None:
             if on_token is not None and cached.answer_text:
                 on_token(cached.answer_text)
+            _observe(cached, trace, cached=True)
             return cached
 
     search_query = question
@@ -141,7 +180,7 @@ def answer_question(
     with trace.stage(f"Searching {len(doc_ids)} document(s)", on_stage) as payload:
         payload["mode"] = mode
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        with TracedPool(max_workers=3) as pool:
             # Speculate on the raw question: dense/lexical search on it starts immediately and
             # runs concurrently with the condense/expansion LLM call(s) below, instead of
             # waiting on them serially.
@@ -265,7 +304,7 @@ def answer_question(
 
     validated_prefix: list[Sentence] = []
     validation_futures: list[tuple[list[Sentence], "Future[list[citations.CitationCheck]]"]] = []
-    validation_pool = ThreadPoolExecutor(max_workers=1)
+    validation_pool = TracedPool(max_workers=1)
 
     def _submit_completed_sentences(accumulated_text: str) -> None:
         # Overlaps cross-encoder validation with token generation (B4): only sentences before the
@@ -278,7 +317,7 @@ def answer_question(
             validation_futures.append((new, validation_pool.submit(citations.validate_batch, new, source_texts, reranker)))
         validated_prefix = complete
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    with TracedPool(max_workers=1) as pool:
         followup_future = pool.submit(_suggested_followups, client, search_query, unused or sources)
         text = _generate_text(
             client,
@@ -359,6 +398,7 @@ def _generate_text(
 ) -> str:
     with trace.stage("Generating", on_stage) as payload:
         payload["prompt"] = prompt
+        payload["model"] = client.model
         if on_token is None:
             completion = client.generate(SYSTEM, prompt)
             text = completion.text
@@ -374,6 +414,10 @@ def _generate_text(
                     on_partial(accumulated)
             text = "".join(parts)
             payload["prompt_tokens"], payload["completion_tokens"] = client.last_usage
+        payload["completion"] = text
+        payload["cost_usd"] = metrics.token_cost(
+            client.model, payload["prompt_tokens"], payload["completion_tokens"]
+        )
     return text.strip()
 
 

@@ -1,0 +1,41 @@
+{{- if .Values.observability.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "sda.fullname" . }}
+  labels:
+    {{- include "sda.labels" . | nindent 4 }}
+    {{- with .Values.observability.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/part-of: sda-metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.observability.serviceMonitor.interval }}
+      {{- if .Values.observability.metricsTokenSecret }}
+      authorization:
+        credentials:
+          name: {{ .Values.observability.metricsTokenSecret }}
+          key: METRICS_TOKEN
+      {{- end }}
+{{- end }}
+{{- if .Values.observability.prometheusRule.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "sda.fullname" . }}
+  labels:
+    {{- include "sda.labels" . | nindent 4 }}
+    {{- with .Values.observability.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+# The same rule file docker-compose feeds to Prometheus, so an alert is written once.
+spec:
+  {{- .Files.Get "files/alerts.yml" | nindent 2 }}
+{{- end }}
