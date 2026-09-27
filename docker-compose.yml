@@ -68,6 +68,10 @@ services:
       S3_SECRET_KEY: minioadmin
       # LLM_PROVIDER=ollama only: the server runs on the host, not in this network.
       OLLAMA_HOST: host.docker.internal:11435
+      # Empty means in-process weights. With the tei profile up:
+      # TEI_EMBED_URL=http://tei-embed:80 TEI_RERANK_URL=http://tei-rerank:80 docker compose       #   --profile app --profile tei up -d
+      TEI_EMBED_URL: ${TEI_EMBED_URL:-}
+      TEI_RERANK_URL: ${TEI_RERANK_URL:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -133,6 +137,39 @@ services:
     depends_on:
       - api
 
+  # Embedding and reranking as their own service: `docker compose --profile tei up -d`, then
+  # point the API and worker at it with TEI_EMBED_URL=http://127.0.0.1:8081 and
+  # TEI_RERANK_URL=http://127.0.0.1:8082 (host) or http://tei-embed:80 / http://tei-rerank:80
+  # (in the app profile). The models are the same ones the in-process backend loads, so the
+  # score scale -- and therefore every tuned threshold -- is unchanged.
+  tei-embed:
+    profiles: ["tei"]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    command: ["--model-id", "BAAI/bge-base-en-v1.5", "--max-client-batch-size", "128"]
+    volumes:
+      - teidata:/data
+    ports:
+      - "8081:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:80/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
+  tei-rerank:
+    profiles: ["tei"]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    command: ["--model-id", "mixedbread-ai/mxbai-rerank-base-v1", "--max-client-batch-size", "128"]
+    volumes:
+      - teidata:/data
+    ports:
+      - "8082:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:80/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 40
+
   # Somewhere for the traces and metrics to land: `docker compose --profile obs up -d`.
   # Point the app at it with OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 (in containers) or
   # http://127.0.0.1:4318 (running the API on the host).
@@ -179,3 +216,4 @@ services:
 volumes:
   pgdata:
   objectdata:
+  teidata:

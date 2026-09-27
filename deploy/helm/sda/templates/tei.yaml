@@ -1,0 +1,119 @@
+{{/* Embedding and reranking as their own deployments. Unlike Postgres, Redis and the object
+     store -- managed services this chart deliberately does not own -- these are workloads of
+     this system: they hold its models and scale on its traffic. Disabled by default, in which
+     case the API and worker keep the weights in-process. */}}
+{{- range $role, $tei := .Values.tei }}
+{{- if $tei.enabled }}
+{{- $name := printf "%s-tei-%s" (include "sda.fullname" $) $role }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels: {{- include "sda.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: tei-{{ $role }}
+spec:
+  replicas: {{ $tei.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+      app.kubernetes.io/component: tei-{{ $role }}
+  template:
+    metadata:
+      labels: {{- include "sda.labels" $ | nindent 8 }}
+        app.kubernetes.io/component: tei-{{ $role }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext: {{- include "sda.podSecurityContext" $ | nindent 8 }}
+      containers:
+        - name: tei
+          image: "{{ $.Values.teiImage.repository }}:{{ $tei.tag | default $.Values.teiImage.tag }}"
+          imagePullPolicy: {{ $.Values.teiImage.pullPolicy }}
+          args:
+            - --model-id
+            - {{ $tei.model | quote }}
+            - --port
+            - "80"
+            - --max-client-batch-size
+            - {{ $tei.maxClientBatchSize | quote }}
+            {{- with $tei.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            # Weights are pulled once into the cache volume; a pod that finds them there starts
+            # without touching the network.
+            - name: HUGGINGFACE_HUB_CACHE
+              value: /data
+          ports:
+            - name: http
+              containerPort: 80
+          # TEI loads the model before /health answers, so readiness gates traffic on a warm
+          # model while liveness must not kill the pod during that load.
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 20
+            failureThreshold: 6
+            initialDelaySeconds: 300
+          resources: {{- toYaml $tei.resources | nindent 12 }}
+          securityContext: {{- include "sda.containerSecurityContext" $ | nindent 12 }}
+          volumeMounts:
+            - name: cache
+              mountPath: /data
+            # readOnlyRootFilesystem: the tokenizer and the model download both need scratch.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          {{- if $tei.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ $name }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+      {{- with $tei.nodeSelector | default $.Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $tei.tolerations | default $.Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels: {{- include "sda.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: tei-{{ $role }}
+spec:
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+  selector:
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: tei-{{ $role }}
+{{- if $tei.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels: {{- include "sda.labels" $ | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ $tei.persistence.size }}
+  {{- with $tei.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

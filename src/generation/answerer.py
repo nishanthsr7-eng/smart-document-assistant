@@ -43,9 +43,18 @@ def _cache_key(
     tenant_id: str, question: str, doc_ids: list[str], mode: str, generate: bool
 ) -> str:
     # tenant_id is part of the key: without it two tenants asking the same question of
-    # same-named documents would share one cached answer.
+    # same-named documents would share one cached answer. retrieval_version is part of it so a
+    # retuned threshold or retrieval knob does not keep serving answers from the old settings --
+    # which is also what makes an evaluation run measure the code it is running.
     raw = "\x1f".join(
-        [tenant_id, question.strip(), "|".join(sorted(doc_ids)), mode, str(generate)]
+        [
+            tenant_id,
+            question.strip(),
+            "|".join(sorted(doc_ids)),
+            mode,
+            str(generate),
+            SETTINGS.retrieval_version,
+        ]
     )
     return hashlib.sha256(raw.encode()).hexdigest()
 
@@ -175,23 +184,29 @@ def _answer(
             _observe(cached, trace, cached=True)
             return cached
 
-    search_query = question
+    # An imperative aimed at the assistant is not part of the information need. Dropping it
+    # here keeps it out of the embedding, the cross-encoder pair and the prompt, so an injected
+    # question is resisted rather than merely refused.
+    asked = query.sanitize(question)
+    search_query = asked
     retrieval_consensus = False
     with trace.stage(f"Searching {len(doc_ids)} document(s)", on_stage) as payload:
         payload["mode"] = mode
+        if asked != question.strip():
+            payload["sanitized_question"] = asked
 
         with TracedPool(max_workers=3) as pool:
             # Speculate on the raw question: dense/lexical search on it starts immediately and
             # runs concurrently with the condense/expansion LLM call(s) below, instead of
             # waiting on them serially.
-            raw_vector = embedder.encode_query([question])[0]
+            raw_vector = embedder.encode_query([asked])[0]
             raw_dense_future = pool.submit(
                 store.query, raw_vector, SETTINGS.retrieval.dense_k, doc_ids, tenant_id
             )
             lexical_future = (
                 pool.submit(
                     keyword_index.query,
-                    question,
+                    asked,
                     SETTINGS.retrieval.lexical_k,
                     doc_ids,
                     tenant_id,
@@ -203,15 +218,15 @@ def _answer(
             variants: list[str] = []
             if history:
                 if SETTINGS.retrieval.query_expansion:
-                    search_query, variants = query.condense_and_expand(client, history, question)
+                    search_query, variants = query.condense_and_expand(client, history, asked)
                 else:
-                    search_query = query.condense(client, history, question)
+                    search_query = query.condense(client, history, asked)
             elif SETTINGS.retrieval.query_expansion:
-                expanded = query.expand_query(client, question)
+                expanded = query.expand_query(client, asked)
                 search_query, variants = expanded[0], expanded[1:]
             payload["standalone_question"] = search_query
 
-            expansion_texts = ([search_query] if search_query != question else []) + variants
+            expansion_texts = ([search_query] if search_query != asked else []) + variants
             hyde_text = query.hyde_passage(client, search_query) if SETTINGS.retrieval.hyde else None
             extra_texts = expansion_texts + ([hyde_text] if hyde_text else [])
 
@@ -230,7 +245,7 @@ def _answer(
             hits = merge_dense([raw_hits] + extra_hits_lists, SETTINGS.retrieval.dense_k)
             lexical_hits = lexical_future.result() if lexical_future is not None else []
 
-        payload["expanded_queries"] = [question] + expansion_texts
+        payload["expanded_queries"] = [asked] + expansion_texts
         payload["dense_hits"] = len(hits)
         payload["dense"] = _hit_summaries(hits)
 
@@ -257,7 +272,9 @@ def _answer(
     calibrated_margin: float = 1.0
     if mode == "hybrid_rerank":
         with trace.stage("Reranking", on_stage) as payload:
-            scored_hits = reranker.rerank(search_query, hits)
+            rerank_queries = query.subqueries(search_query)
+            scored_hits = reranker.rerank(rerank_queries, hits)
+            payload["rerank_queries"] = rerank_queries
             top_score = scored_hits[0].score if scored_hits else None
             margin = 1.0 if len(scored_hits) < 2 else scored_hits[0].score - scored_hits[1].score
             payload["top_score"] = top_score
@@ -278,7 +295,7 @@ def _answer(
     if gate.should_abstain:
         with trace.stage("Abstaining", on_stage) as payload:
             payload["reason"] = gate.reason
-        suggestions = _didyoumean(client, question, gate.near_miss) if generate else []
+        suggestions = _didyoumean(client, asked, gate.near_miss) if generate else []
         return _finish(
             cache_key,
             Answer(
@@ -321,7 +338,7 @@ def _answer(
         followup_future = pool.submit(_suggested_followups, client, search_query, unused or sources)
         text = _generate_text(
             client,
-            build_user_prompt(question, prompt_sources),
+            build_user_prompt(asked, prompt_sources),
             trace,
             on_stage,
             on_token,

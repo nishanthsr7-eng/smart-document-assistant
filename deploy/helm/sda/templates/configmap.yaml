@@ -11,3 +11,9 @@ data:
   OTEL_EXPORTER_OTLP_ENDPOINT: {{ .Values.observability.otlpEndpoint | quote }}
   OTEL_TRACE_SAMPLE_RATIO: {{ .Values.observability.traceSampleRatio | quote }}
   LOG_JSON: {{ ternary "1" "0" .Values.observability.logJson | quote }}
+  {{- if .Values.tei.embed.enabled }}
+  TEI_EMBED_URL: http://{{ include "sda.fullname" . }}-tei-embed
+  {{- end }}
+  {{- if .Values.tei.rerank.enabled }}
+  TEI_RERANK_URL: http://{{ include "sda.fullname" . }}-tei-rerank
+  {{- end }}

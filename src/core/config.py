@@ -1,3 +1,4 @@
+import dataclasses
 import hashlib
 import json
 import os
@@ -80,7 +81,8 @@ class AuthConfig:
 
 
 # USD per million tokens, (prompt, completion). A model that is not listed costs 0 rather than
-# a guess: a wrong number on a cost dashboard is worse than a visibly absent one.
+# a guess: a wrong number on a cost dashboard is worse than a visibly absent one. That is why
+# the current Groq default is absent here -- set MODEL_PRICING_JSON with the rate on your plan.
 _DEFAULT_PRICING: dict[str, tuple[float, float]] = {
     "gemini-3.6-flash": (0.30, 2.50),
     "gemini-2.5-flash": (0.30, 2.50),
@@ -131,6 +133,12 @@ class ModelConfig:
     embedder_max_tokens: int = 512
     reranker_name: str = "mixedbread-ai/mxbai-rerank-base-v1"
     blip_name: str = "Salesforce/blip-image-captioning-base"
+    # Set either URL to move that forward pass out of the API process and onto a TEI service
+    # (dynamic batching, ONNX/int8, its own scaling envelope). Unset means in-process weights.
+    tei_embed_url: str = os.environ.get("TEI_EMBED_URL", "")
+    tei_rerank_url: str = os.environ.get("TEI_RERANK_URL", "")
+    tei_timeout_s: int = int(os.environ.get("TEI_TIMEOUT_S", "60"))
+    tei_max_connections: int = int(os.environ.get("TEI_MAX_CONNECTIONS", "16"))
     # Generation provider: "gemini" (default), "groq", "ollama" (offline fallback), or
     # "none" (retrieval only -- no key and no generation; used by the CI eval gate).
     llm_provider: str = os.environ.get("LLM_PROVIDER", "gemini").lower()
@@ -139,7 +147,7 @@ class ModelConfig:
     gemini_api_key: str = os.environ.get("GEMINI_API_KEY", "")
     gemini_model: str = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
     groq_api_key: str = os.environ.get("GROQ_API_KEY", "")
-    groq_model: str = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    groq_model: str = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
 
 @dataclass(frozen=True)
@@ -164,6 +172,10 @@ class RetrievalConfig:
     context_token_budget: int = 3000
     max_per_doc: int = 2
     query_expansion: bool = True
+    # Compound and preamble-laden questions dilute a single cross-encoder pair, so the question
+    # is split into clauses and each passage keeps its best score. 1 disables the split.
+    max_subqueries: int = 3
+    min_subquery_words: int = 4
     expansion_variants: int = 3
     hyde: bool = False
     mmr_lambda: float = 0.7
@@ -211,6 +223,7 @@ class Settings:
     generation: GenerationConfig
     max_question_chars: int
     ingest_version: str
+    retrieval_version: str
 
 
 def _build_ingest_version(ingestion: IngestionConfig, embedder_name: str) -> str:
@@ -218,9 +231,25 @@ def _build_ingest_version(ingestion: IngestionConfig, embedder_name: str) -> str
     return hashlib.sha256(payload.encode()).hexdigest()[:12]
 
 
+def _build_retrieval_version(retrieval: RetrievalConfig, trust: TrustConfig, models: ModelConfig) -> str:
+    """Identifies the configuration a cached answer was produced under.
+
+    Part of the answer cache key: retuning a threshold or a retrieval knob must not keep
+    serving answers computed under the old one, and an evaluation run must not read a previous
+    run's answers back out of Redis.
+    """
+    payload = json.dumps(
+        [dataclasses.asdict(retrieval), dataclasses.asdict(trust), models.embedder_name, models.reranker_name],
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:12]
+
+
 def _build_settings() -> Settings:
     ingestion = IngestionConfig()
     models = ModelConfig()
+    retrieval = RetrievalConfig()
+    trust = TrustConfig()
     return Settings(
         paths=Paths(),
         storage=StorageConfig(),
@@ -229,11 +258,12 @@ def _build_settings() -> Settings:
         observability=ObservabilityConfig(),
         models=models,
         ingestion=ingestion,
-        retrieval=RetrievalConfig(),
-        trust=TrustConfig(),
+        retrieval=retrieval,
+        trust=trust,
         generation=GenerationConfig(),
         max_question_chars=2000,
         ingest_version=_build_ingest_version(ingestion, models.embedder_name),
+        retrieval_version=_build_retrieval_version(retrieval, trust, models),
     )
 
 

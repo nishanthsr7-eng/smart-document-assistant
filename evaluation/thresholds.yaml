@@ -8,29 +8,35 @@
 #
 # Floors are set below the measured baseline with headroom for run-to-run variance in the
 # reranker, not at the baseline itself: a gate that fires on noise gets disabled within a week.
-version: 2
+version: 3
 profiles:
   retrieval:
     mode: hybrid_rerank
     generate: false
     gates:
       retrieval.hit_at_k: {min: 0.95}
-      retrieval.mrr: {min: 0.85}
-      retrieval.context_recall: {min: 0.70}
+      retrieval.mrr: {min: 0.95}
+      retrieval.context_recall: {min: 0.85}
       retrieval.context_precision: {min: 0.55}
-      abstention.refusal_recall: {min: 0.75}
-      abstention.false_refusal_rate: {max: 0.25}
+      # Refusing an unanswerable question is the safety property, and the unanswerable items
+      # score an order of magnitude below the threshold rather than near it, so this is tight
+      # enough that one miss out of eight fails.
+      abstention.refusal_recall: {min: 0.90}
+      # Was 0.25, against a measured 0.16: four answerable questions whose target passage was
+      # at rank 1 were refused anyway (see query decomposition, step 8). Measured 0.00 now;
+      # the ceiling allows two flips before it fires.
+      abstention.false_refusal_rate: {max: 0.10}
 
   generation:
     mode: hybrid_rerank
     generate: true
     gates:
       retrieval.hit_at_k: {min: 0.95}
-      retrieval.mrr: {min: 0.85}
-      retrieval.context_recall: {min: 0.70}
+      retrieval.mrr: {min: 0.95}
+      retrieval.context_recall: {min: 0.85}
       retrieval.context_precision: {min: 0.55}
-      abstention.refusal_recall: {min: 0.75}
-      abstention.false_refusal_rate: {max: 0.25}
+      abstention.refusal_recall: {min: 0.90}
+      abstention.false_refusal_rate: {max: 0.10}
       generation.must_contain_accuracy: {min: 0.70}
       generation.citation_validity: {min: 0.65}
       generation.numeric_grounding_pass_rate: {min: 0.80}

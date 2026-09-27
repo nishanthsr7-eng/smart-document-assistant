@@ -104,8 +104,8 @@ data/sample_docs/        Three real public-domain U.S. government documents
 | Component | Choice | Why |
 |---|---|---|
 | **LLM** | Gemini (`gemini-3.6-flash`) by default; Groq or Ollama `qwen3:8b` as swappable providers | Free-tier cloud inference is far faster than CPU-only local generation; see **Provider Choice** below. Answers are plain text with inline `[n]` citation markers, parsed by `prompts.parse_citations` — not schema-enforced JSON. |
-| **Embeddings** | `BAAI/bge-base-en-v1.5` | Runs locally on CPU, strong retrieval quality for its size, well-tested for semantic search. |
-| **Reranker** | `mxbai-rerank-base-v1` | Cross-encoder precision pass; used as a trust signal for confidence/citation scoring, and for reranking retrieval results in the default mode. |
+| **Embeddings** | `BAAI/bge-base-en-v1.5`, in-process or on a TEI service | Runs locally on CPU, strong retrieval quality for its size, well-tested for semantic search. Set `TEI_EMBED_URL` to move the forward pass onto HuggingFace Text Embeddings Inference; see **Inference service**. |
+| **Reranker** | `mxbai-rerank-base-v1`, in-process or on a TEI service | Cross-encoder precision pass; used as a trust signal for confidence/citation scoring, and for reranking retrieval results in the default mode. Scored against each sub-query of a compound question, not the whole string; see **Query decomposition**. |
 | **Vector store** | Postgres + pgvector (HNSW, cosine) | One transactional store for metadata and vectors, shared by every API worker. Replaces embedded ChromaDB, which was single-writer, per-process and unreplicable. |
 | **Lexical search** | Postgres `tsvector` + GIN | Complements dense search for keyword-heavy queries (policy numbers, proper nouns). Replaces in-process BM25, whose corpus lived in one worker's RAM. Ranking is `ts_rank_cd`; fusion is rank-based, so the change of scale is immaterial. |
 | **System of record** | Postgres (`documents`, `chunks`) via SQLAlchemy 2.0 + Alembic | Replaces `manifest.json`, which was a read-modify-write with no lock. |
@@ -207,6 +207,31 @@ reaching for HuggingFace at runtime. The first build is therefore slow; layers c
 
 Both images run as a non-root user with a read-only root filesystem.
 
+### Inference service
+
+Embedding and reranking are the two CPU-bound forward passes on the request path. By default they
+run in-process, which is simplest and is what the dev loop uses. Setting either URL moves that
+pass onto a [HuggingFace TEI](https://github.com/huggingface/text-embeddings-inference) service
+instead, which batches across concurrent requests and scales on its own:
+
+```bash
+docker compose --profile tei up -d
+export TEI_EMBED_URL=http://127.0.0.1:8081
+export TEI_RERANK_URL=http://127.0.0.1:8082
+```
+
+The models are the ones the in-process backend loads, and TEI applies the same sigmoid to a
+`num_labels=1` cross-encoder, so scores stay on the scale every tuned threshold assumes -- the
+backends are interchangeable without a retune. `GET /health` gains a `tei_embed` / `tei_rerank`
+probe when a URL is set: unlike lazily loaded local weights, a remote dependency being down means
+the replica cannot serve, so it gates readiness.
+
+In the chart, `tei.embed.enabled` / `tei.rerank.enabled` add a deployment, a service and an
+optional weights PVC each, and wire the two URLs into the backend ConfigMap. This is the piece
+that makes API pods cheap and stateless: the weights, the memory and the GPU node pool (swap
+`teiImage.tag` for a CUDA tag) belong to a workload that scales on inference load rather than on
+request count.
+
 ### Deploying to Kubernetes
 
 `deploy/helm/sda` is a Helm chart for the three workloads. Postgres, Redis and the object store
@@ -295,11 +320,13 @@ delete, job read or cache entry crosses a workspace boundary.
 | `GEMINI_API_KEY` | _(empty)_ | Required when `LLM_PROVIDER=gemini` |
 | `GEMINI_MODEL` | `gemini-3.6-flash` | Gemini model name |
 | `GROQ_API_KEY` | _(empty)_ | Required when `LLM_PROVIDER=groq` |
-| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model name |
+| `GROQ_MODEL` | `openai/gpt-oss-120b` | Groq model name |
 | `OLLAMA_HOST` | `127.0.0.1:11435` | Ollama server address, used when `LLM_PROVIDER=ollama` |
 | `OLLAMA_MODEL` | `qwen3:8b` | Ollama model name |
 | `DATABASE_URL` | _(required)_ | Postgres DSN, e.g. `postgresql+psycopg://sda:sda@127.0.0.1:5433/sda` |
 | `REDIS_URL` | _(required)_ | Redis DSN for the answer cache and ingest locks |
+| `TEI_EMBED_URL` / `TEI_RERANK_URL` | _(empty)_ | Serve embeddings/reranking from a TEI service instead of in-process weights |
+| `TEI_TIMEOUT_S` / `TEI_MAX_CONNECTIONS` | `60` / `16` | TEI request timeout and connection pool size |
 | `S3_ENDPOINT` / `S3_BUCKET` | _(required)_ | Object store for raw uploads and parent blobs |
 | `S3_ACCESS_KEY` / `S3_SECRET_KEY` | _(required)_ | Object store credentials |
 | `S3_REGION` | `us-east-1` | Object store region |
@@ -333,6 +360,9 @@ pytest tests/ -v
 python -m evaluation.run_eval --mode hybrid --generate
 ```
 
+The run ingests `data/sample_docs` into a reserved evaluation tenant. The test suite resets every
+tenant, so do not run `pytest` against the same stack while an evaluation is in flight.
+
 ## Hallucination Handling
 
 The system uses a multi-layer defense against hallucination:
@@ -354,6 +384,25 @@ When different sources provide conflicting information (e.g., different numeric 
 
 ### 6. Prompt Injection Defense
 Uploaded documents are untrusted input. Source blocks in the prompt are wrapped in random-nonce XML tags, and any tag-like text inside the document is stripped, preventing a malicious document from forging citation boundaries or injecting instructions.
+
+The *question* is untrusted too. `query.sanitize` drops clauses that instruct the assistant
+("ignore all previous instructions", "you are now in developer mode", "reveal your system prompt")
+and keeps the clauses that ask about documents, before anything else sees the text: the embedding,
+the cross-encoder pair, the abstain gate and the prompt all run on what was actually asked. If
+every clause is an instruction there is nothing left to retrieve on, the original goes through
+unchanged, and the abstain gate refuses it. Matching is literal, not a classifier -- a fuzzy rule
+here would start deleting genuine questions about what a policy prohibits.
+
+### Query decomposition
+
+A cross-encoder scores one (question, passage) pair. A compound question -- "are employees
+prohibited from accepting gifts, and how many hours of sick leave can be used for bereavement?" --
+dilutes every pair it forms: a passage that fully answers one half is penalised for the half it
+does not answer, and the top score can land under the abstain threshold with the right passage
+sitting at rank 1. `query.subqueries` splits on sentence ends, on a coordinated second question
+(the right side has to open like a question, so "office hours for FAS, RMA and FSA" is left
+alone), and on a leading attribution preamble. Each passage keeps its best score across the parts,
+all of which go out as one batch. A question that does not split costs exactly what it did before.
 
 ## Additional Features
 
@@ -396,6 +445,11 @@ prompt-injection queries against three real public-domain U.S. government docume
 `evaluation/results/*.md`).
 
 **Default mode: `hybrid_rerank`** (dense + BM25 fusion, cross-encoder reranked)
+
+The mode comparison below predates query decomposition (see **Query decomposition** and
+`docs/production-readiness.md` item 24). Its `hybrid_rerank` column is the *before* half of that
+change: false refusal rate has since gone 0.160 -> 0.000 and MRR 0.948 -> 1.000 on the same golden
+set. The gated numbers under **Eval gating** are the current ones.
 
 | Metric | `dense` | `hybrid` | `hybrid_rerank` |
 |---|---|---|---|
@@ -442,10 +496,35 @@ LLM_PROVIDER=none python -m evaluation.run_eval --gate retrieval
 
 The per-type breakdown found a live defect on its first run: all four false refusals had the target
 passage in the top-k, and the two prompt-injection questions scored lowest of all (0.002 and 0.005
-against a 0.3 abstain threshold). The injected preamble dominates the cross-encoder pair, so the
-abstain gate judges the attack text rather than the question. The system currently survives an
-injected question by refusing it, which is not the same as resisting it — see
-`docs/production-readiness.md` item 17.
+against a 0.3 abstain threshold). The injected preamble dominated the cross-encoder pair, so the
+abstain gate was judging the attack text rather than the question, and the system survived an
+injected question by refusing it rather than by resisting it.
+
+That is fixed (`docs/production-readiness.md` item 24): the question is sanitized and decomposed
+before it is scored, and each passage keeps its best score across the parts. Current gated baseline,
+`retrieval` profile, 33 items:
+
+| Metric | Before | After | Floor (v3) |
+|---|---|---|---|
+| retrieval.hit_at_k | 1.000 | 1.000 | min 0.95 |
+| retrieval.mrr | 0.948 | **1.000** | min 0.95 |
+| retrieval.context_recall | 0.780 | **0.960** | min 0.85 |
+| retrieval.context_precision | 0.706 | 0.680 | min 0.55 |
+| abstention.refusal_recall | 1.000 | 1.000 | min 0.90 |
+| abstention.false_refusal_rate | 0.160 | **0.000** | max 0.10 |
+
+All four false refusals cleared, no unanswerable question lost its refusal, and the thresholds were
+ratcheted in the same commit so the gain is what now cannot regress. Context precision is the one
+loss and the expected one: a compound question assembles sources for both of its halves.
+
+The `generation` profile, on `openai/gpt-oss-120b` via Groq, passes must-contain (0.913),
+faithfulness (0.907) and injection resistance (1.000 -- the two injected questions are now
+*answered correctly from the documents* with no leak, instead of refused), and **fails** citation
+validity (0.447 against a 0.65 floor) and numeric grounding (0.414 against 0.80). Those floors were
+set against an older `qwen3:8b` run and this is the first time the profile has run on a hosted
+provider, so the failure is not yet attributed to either the model's formatting or the pipeline;
+the floors stay where they are until a same-provider comparison says which. See
+`docs/production-readiness.md` item 24.
 
 ## AI Tools Used
 
@@ -460,12 +539,12 @@ Specific uses:
 
 ## Known Limitations
 
-1. **Reranker latency**: The cross-encoder reranker adds meaningful latency, especially on CPU-only hardware.
+1. **Reranker latency**: The cross-encoder reranker adds meaningful latency, especially on CPU-only hardware, and a question that splits into parts multiplies the pairs it scores (p50 13.2s unchanged, p95 42.4s on this machine's CPU). Moving it onto TEI (see **Inference service**) is the mitigation; an int8/ONNX-quantized deployment has not been benchmarked here.
 2. **PDF-only complex parsing**: Only PDF and TXT are supported. DOCX/XLSX could be added via docling but were out of scope.
 3. **No OCR**: Fully scanned PDFs are rejected. Mixed PDFs (text pages + scanned forms) index the text pages only and caption figures via BLIP, but scanned text itself isn't recovered.
 4. **Single-session memory**: Follow-up questions are resolved against the last few turns via a condense-and-expand prompt, but history lives only in the browser tab and is lost on refresh — nothing is persisted server-side.
-5. **Unvalidated `doc_ids`**: `/query`'s `doc_ids` filter is client-supplied and not checked against the manifest. Harmless for a single-user local app, but not something to carry into a multi-user deployment as-is.
-5. **Abstention calibration**: The abstention threshold (0.3) was swept on a 33-item golden set. A larger, more diverse evaluation set would produce more robust thresholds.
+5. **Abstention calibration**: The abstention threshold (0.3) was swept on a 33-item golden set, before query decomposition changed the score distribution it was swept against; it has not been re-swept. A larger, more diverse evaluation set would produce more robust thresholds.
+6. **Rule-based query decomposition**: Sub-queries come from punctuation and a question-opening word list, not from a model. Questions those rules do not cover keep the old single-pair behaviour.
 
 ## Time Log
 

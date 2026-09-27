@@ -59,6 +59,8 @@ def clean_state(storage_stack):
 
 
 def _reset() -> None:
+    # Every tenant, including the evaluation corpus: do not run the suite against a stack that
+    # an evaluation run is using.
     from sqlalchemy import delete
 
     from src.core.cache import ANSWER_CACHE, DOC_CACHE

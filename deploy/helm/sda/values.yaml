@@ -10,6 +10,11 @@ frontendImage:
   tag: ""
   pullPolicy: IfNotPresent
 
+teiImage:
+  repository: ghcr.io/huggingface/text-embeddings-inference
+  tag: cpu-1.8     # use a CUDA tag (e.g. 1.8) on a GPU node pool
+  pullPolicy: IfNotPresent
+
 imagePullSecrets: []
 
 api:
@@ -51,6 +56,38 @@ frontend:
   resources:
     requests: {cpu: "10m", memory: 32Mi}
     limits: {cpu: "200m", memory: 128Mi}
+
+# Embedding and reranking off the API's own CPU. Disabled means in-process weights, which is
+# the single-replica default; enabling either one sets TEI_EMBED_URL / TEI_RERANK_URL on the API
+# and the worker, so nothing else in the chart changes. The reranker is the heavier of the two:
+# it runs `rerank_candidates x sub-queries` pairs per question against one pair per passage.
+tei:
+  embed:
+    enabled: false
+    model: BAAI/bge-base-en-v1.5
+    replicas: 2
+    maxClientBatchSize: 128
+    tag: ""
+    extraArgs: []
+    resources:
+      requests: {cpu: "1", memory: 2Gi}
+      limits: {cpu: "2", memory: 4Gi}
+    persistence: {enabled: false, size: 10Gi, storageClass: ""}
+    nodeSelector: {}
+    tolerations: []
+  rerank:
+    enabled: false
+    model: mixedbread-ai/mxbai-rerank-base-v1
+    replicas: 2
+    maxClientBatchSize: 128
+    tag: ""
+    extraArgs: []
+    resources:
+      requests: {cpu: "2", memory: 2Gi}
+      limits: {cpu: "4", memory: 4Gi}
+    persistence: {enabled: false, size: 10Gi, storageClass: ""}
+    nodeSelector: {}
+    tolerations: []
 
 # Traces, metrics, logs. Nothing here is required: with no OTLP endpoint and no Langfuse keys the
 # pods still record spans and serve /metrics, they just ship nothing outward.

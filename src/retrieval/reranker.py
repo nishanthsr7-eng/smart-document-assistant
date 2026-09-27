@@ -1,24 +1,51 @@
 import dataclasses
 import math
 
-from sentence_transformers import CrossEncoder
-
 from src.core.config import SETTINGS
+from src.retrieval.tei import TeiReranker
 from src.retrieval.vector_store import Hit
 
 
-class Reranker:
+class _LocalCrossEncoder:
     def __init__(self) -> None:
+        from sentence_transformers import CrossEncoder
+
         self._model = CrossEncoder(SETTINGS.models.reranker_name, cache_folder=str(SETTINGS.paths.models))
 
-    def rerank(self, question: str, hits: list[Hit]) -> list[Hit]:
+    def score(self, pairs: list[tuple[str, str]]) -> list[float]:
+        # num_labels=1 model: CrossEncoder applies sigmoid internally, so scores are already
+        # probabilities. TEI's /rerank does the same, which is what keeps the two backends
+        # interchangeable under one set of thresholds.
+        return [float(p) for p in self._model.predict(pairs)]
+
+
+class Reranker:
+    """In-process weights by default; a TEI service when `TEI_RERANK_URL` is set."""
+
+    def __init__(self) -> None:
+        url = SETTINGS.models.tei_rerank_url
+        self.backend = "tei" if url else "local"
+        self._impl: TeiReranker | _LocalCrossEncoder = TeiReranker(url) if url else _LocalCrossEncoder()
+
+    def rerank(self, queries: list[str], hits: list[Hit]) -> list[Hit]:
+        """Score each candidate against every sub-query and keep its best.
+
+        A passage that fully answers one half of a compound question should not be penalised for
+        the half it does not answer. All pairs go out in one batch, so the extra sub-queries cost
+        one larger forward pass rather than several round trips.
+        """
         candidates = hits[: SETTINGS.retrieval.rerank_candidates]
         if not candidates:
             return []
-        probabilities = self.score([(question, hit.text) for hit in candidates])
+        pairs = [(query, hit.text) for query in queries for hit in candidates]
+        probabilities = self.score(pairs)
+        best = [
+            max(probabilities[i] for i in range(index, len(pairs), len(candidates)))
+            for index in range(len(candidates))
+        ]
         reranked = [
             dataclasses.replace(hit, score=probability)
-            for hit, probability in zip(candidates, probabilities, strict=True)
+            for hit, probability in zip(candidates, best, strict=True)
         ]
         reranked.sort(key=lambda h: h.score, reverse=True)
         return reranked
@@ -26,8 +53,7 @@ class Reranker:
     def score(self, pairs: list[tuple[str, str]]) -> list[float]:
         if not pairs:
             return []
-        # num_labels=1 model: CrossEncoder applies sigmoid internally, so scores are already probabilities.
-        return [float(p) for p in self._model.predict(pairs)]
+        return self._impl.score(pairs)
 
     @staticmethod
     def calibrate(scores: list[float]) -> list[float]:

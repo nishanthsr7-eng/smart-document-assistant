@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from src.api import deps
 from src.core.config import SETTINGS
+from src.retrieval import tei
 from src.storage import objects
 from src.storage.db import engine
 from src.storage.redis_client import client
@@ -36,12 +37,17 @@ def check_health() -> dict[str, str]:
         "redis": _probe(_redis),
         "object_store": _probe(objects.health),
     }
+    # A TEI service is a remote dependency, so unlike lazily loaded local weights it does gate
+    # readiness: with it down the replica cannot embed or rerank anything.
+    for name, url in (("tei_embed", SETTINGS.models.tei_embed_url), ("tei_rerank", SETTINGS.models.tei_rerank_url)):
+        if url:
+            backends[name] = _probe(lambda u=url: tei.health(u))  # type: ignore[misc]
     # Model handles are reported but do not gate readiness: they load lazily on first use, and a
     # worker that has not served a request yet is still able to.
     checks = {
         **backends,
-        "embedder": _loaded(deps.embedder),
-        "reranker": _loaded(deps.reranker),
+        "embedder": "tei" if SETTINGS.models.tei_embed_url else _loaded(deps.embedder),
+        "reranker": "tei" if SETTINGS.models.tei_rerank_url else _loaded(deps.reranker),
         "llm": _loaded(deps.llm_client),
         "status": "ok" if all(v == "ok" for v in backends.values()) else "degraded",
         "provider": SETTINGS.models.llm_provider,
