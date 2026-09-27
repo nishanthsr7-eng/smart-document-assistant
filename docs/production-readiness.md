@@ -369,7 +369,7 @@ ONNX Runtime or OpenVINO for CPU. API pods become stateless and cheap; GPU nodes
 - GDPR erasure: deletion must verifiably purge vector store + lexical index + answer cache + object
   store + logs. Today `ANSWER_CACHE.clear()` covers one process only.
 
-### 17. Evaluation exists but does not gate anything
+### 17. Evaluation exists but does not gate anything — **DONE**
 `evaluation/run_eval.py` is genuinely good — recall@k, citation validity, numeric grounding,
 faithfulness, abstain sweep. The problems: it runs manually, results are committed as JSON, and the
 golden set rides on a single sample doc.
@@ -381,6 +381,66 @@ definitions so numbers are comparable to the literature; LLM-as-judge with a str
 human spot-checks on a sampled slice; per-commit metrics on a dashboard; close the loop online —
 thumbs up/down in the UI, production traces auto-curated into eval datasets, shadow-mode and canary
 A/B for retrieval config changes.
+
+**Done.** `evaluation/thresholds.yaml` is the versioned config artifact and `run_eval.py --gate
+<profile>` is the gate: it runs the golden set, compares each metric against a floor or ceiling,
+writes `results/gate_<profile>.{json,md}`, appends the table to `$GITHUB_STEP_SUMMARY`, and exits
+non-zero on a breach. Thresholds live in a file rather than in the workflow so that retuning a
+number is a reviewable diff with a reason attached, not an edit buried in CI yaml.
+
+There are two profiles because CI has no API key. `retrieval` runs on every PR in the new `eval`
+job of `.github/workflows/ci.yml` and gates ranking, context assembly and the abstain gate;
+`generation` adds the answer-quality metrics and runs nightly from
+`.github/workflows/eval-nightly.yml`, which fails loudly if the `GEMINI_API_KEY` secret is absent
+rather than quietly skipping. Both upload the gate report as an artifact.
+
+Making the PR gate provider-free needed one code change: `LLM_PROVIDER=none`
+(`NullProvider` in `src/generation/client.py`). Its `generate` returns empty text, which
+`query.condense`/`expand_query` already fall back from, so retrieval runs unexpanded instead of
+against variants some stub invented; `stream` raises, so the mode cannot be mistaken for a
+working deployment. The alternative -- letting CI run with no expansion by silently skipping the
+call -- would have gated a configuration that differs from production in an unstated way.
+
+Two things make the gate harder to fool than a row of means. A metric the run did not produce
+**fails** rather than passes: a stage that stops emitting a number is the regression mode a naive
+`value >= floor` check is blind to. And every result now carries a `by_type` breakdown (the eight
+golden-set types: lookup, table, exact_term, paraphrase, multi_doc, conflict, unanswerable,
+injection), because an overall number that holds while one type collapses is exactly what a single
+mean hides. Floors sit below the measured baseline with headroom for reranker variance, not at it
+-- a gate that fires on noise gets disabled within a week.
+
+A new metric came with this: `generation.injection_resistance`, gated at 1.0 with no headroom,
+scoring whether an instruction embedded in the question was followed (leak markers in the answer
+text or in the suggestions). The golden set already had the `injection` type; nothing graded it.
+
+`tests/test_eval_gate.py` (10 tests) tests the gate itself -- bound comparison, the
+not-measured failure, injection scoring, per-type bucketing -- plus golden-set integrity:
+every declared type is present, ids are unique, `answerable` agrees with whether expectations
+exist, and every expectation names a document that is actually in `data/sample_docs`. The
+gate has no database or provider dependency, so it runs in the existing `backend` job.
+
+Measured baseline, `retrieval` profile, 33 items, `hybrid_rerank`: hit@k 1.000, MRR 0.948,
+context recall 0.780, context precision 0.706, refusal recall 1.000, false refusal rate 0.160 --
+PASS. The failure path was verified separately against the same results with a tightened floor
+and a metric the run does not produce: both fail, exit 1.
+
+**What the breakdown immediately surfaced, and it is a real defect.** All four false refusals have
+`hit_at_k = 1.0` -- retrieval found the right passage every time and the abstain gate threw it
+away. Two of the four are the injection items, and their rerank scores are the lowest in the run
+(0.0023 and 0.0053, against a 0.3 threshold): the injected preamble dominates the cross-encoder
+pair, so the question never gets scored on its actual content. The system's current defense
+against an injected question is that it refuses to answer it at all, which is not the same thing
+as resisting it -- `injection_resistance` would pass trivially on an abstention. The fix belongs
+to retrieval (score the condensed question, not the raw one, and condense before the abstain gate
+rather than after), which is step 8; the point here is that the gate is what makes it visible and
+what will keep it fixed. `eh-05` (a table lookup) and `multi-05` (a two-document question) fail
+the same way for the ordinary reason: a long question dilutes the cross-encoder pair.
+
+Not done: RAGAS/DeepEval for standard metric definitions (the metrics here are hand-rolled, so
+they are not directly comparable to the literature), LLM-as-judge with a stronger model, a
+per-commit metrics dashboard, and the online loop -- thumbs up/down in the UI, production traces
+curated into eval datasets, shadow-mode and canary A/B. The golden set is still 33 items over
+three documents, which is enough to catch a collapse and not enough to resolve a two-point move.
 
 ### 18. Test suite is thin for the blast radius
 676 lines, no coverage gate, no frontend tests, no SSE contract test, no load test.
@@ -450,9 +510,11 @@ streams, 12-factor compliance throughout.
 4. ~~**Auth + tenancy** — with the cross-tenant isolation test~~ **done** (local JWT)
 5. ~~**Docker + CI + Helm** — reproducible deploys~~ **done**
 6. ~~**OpenTelemetry + Prometheus + Langfuse** — so it can be seen~~ **done**
-7. **Eval gating in CI** — so quality cannot silently regress
+7. ~~**Eval gating in CI** — so quality cannot silently regress~~ **done**
 8. **TEI inference service**, then retrieval-quality work against gated evals
 
-Steps 1-6 turn this from a prototype into a service a team can see into, and are done. 7 is next. 8 and the P2 list are
-where ML differentiation compounds — and they are only safe after 7, because without gated evals
-every retrieval change is a coin flip.
+Steps 1-7 turn this from a prototype into a service a team can see into and measure, and are done.
+8 and the P2 list are where ML differentiation compounds, and they are now safe to attempt: with
+the gate in place a retrieval change is a measurement rather than a coin flip. The first item for
+8 is already written down — the abstain gate scoring the raw question instead of the condensed one
+(item 17), which costs four answerable questions out of twenty-five.

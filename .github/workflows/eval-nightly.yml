@@ -1,0 +1,96 @@
+name: eval-nightly
+
+# The generation half of the gate. Separate from ci.yml because it needs a provider key, which a
+# pull request from a fork cannot have, and because a full generate run costs tokens and minutes.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Profile from evaluation/thresholds.yaml
+        default: generation
+        type: choice
+        options: [generation, retrieval]
+
+env:
+  PYTHON_VERSION: "3.10"
+  TORCH_VERSION: "2.14.0"
+  TORCHVISION_VERSION: "0.29.0"
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: sda
+          POSTGRES_PASSWORD: sda
+          POSTGRES_DB: sda
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sda"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6380:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://sda:sda@127.0.0.1:5433/sda
+      REDIS_URL: redis://127.0.0.1:6380/0
+      S3_ENDPOINT: http://127.0.0.1:9002
+      S3_BUCKET: sda-documents
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      JWT_SECRET: ci-only-not-a-real-secret
+      LLM_PROVIDER: gemini
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Require a provider key
+        run: test -n "$GEMINI_API_KEY" || { echo "GEMINI_API_KEY secret is not set"; exit 1; }
+
+      - name: Start object store
+        run: |
+          docker run -d --name objectstore -p 9002:8333 \
+            -v "$PWD/docker/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro" \
+            chrislusf/seaweedfs:latest \
+            server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+          for _ in $(seq 1 40); do
+            curl -sf http://127.0.0.1:9002/ >/dev/null && exit 0
+            sleep 2
+          done
+          docker logs objectstore
+          exit 1
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}"
+          pip install -r requirements.txt
+
+      - name: Cache model weights
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            data/models
+          key: models-${{ hashFiles('src/core/config.py') }}
+
+      - run: alembic upgrade head
+      - name: Eval gate
+        run: python -m evaluation.run_eval --gate ${{ inputs.profile || 'generation' }}
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-gate-nightly
+          path: evaluation/results/gate_*.*

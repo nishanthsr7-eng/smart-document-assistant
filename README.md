@@ -124,7 +124,7 @@ data/sample_docs/        Three real public-domain U.S. government documents
 
 ## Provider Choice
 
-Generation is pluggable via `LLM_PROVIDER` (`src/generation/client.py`): `gemini` (default), `groq`, or `ollama`.
+Generation is pluggable via `LLM_PROVIDER` (`src/generation/client.py`): `gemini` (default), `groq`, `ollama`, or `none`.
 
 The default is a cloud API, not fully-offline local inference, because CPU-only generation with a model capable enough to follow citation instructions reliably is slow (multi-second per answer) on typical grading hardware. Gemini and Groq both have generous free tiers that need only a key pasted into `.env` — no payment method, no account beyond the API signup. `ollama` remains available as a genuinely offline fallback (`qwen3:8b`) for anyone who'd rather not use a cloud key at all; set `LLM_PROVIDER=ollama` and follow the Ollama setup steps below.
 
@@ -291,7 +291,7 @@ delete, job read or cache entry crosses a workspace boundary.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LLM_PROVIDER` | `gemini` | Generation backend: `gemini`, `groq`, or `ollama` |
+| `LLM_PROVIDER` | `gemini` | Generation backend: `gemini`, `groq`, `ollama`, or `none` (retrieval only) |
 | `GEMINI_API_KEY` | _(empty)_ | Required when `LLM_PROVIDER=gemini` |
 | `GEMINI_MODEL` | `gemini-3.6-flash` | Gemini model name |
 | `GROQ_API_KEY` | _(empty)_ | Required when `LLM_PROVIDER=groq` |
@@ -421,6 +421,31 @@ Key results for the default mode (`hybrid_rerank`):
   will likely differ and haven't been benchmarked here.
 - `hybrid`'s false-refusal rate dropped from a near-universal abstain (pre-fix) to 0.000 — confirms the
   RRF score normalization fix (step 1) put it on a threshold scale that actually works.
+
+### Eval gating
+
+The golden set gates CI. `evaluation/thresholds.yaml` holds the floors and ceilings, versioned so a
+retune is a reviewable diff; `python -m evaluation.run_eval --gate <profile>` runs the set, prints a
+pass/fail table with a per-question-type breakdown, and exits non-zero on a breach. A metric the run
+did not produce fails rather than passes.
+
+Two profiles, because CI has no API key:
+
+| Profile | Runs | Gates | Provider |
+|---|---|---|---|
+| `retrieval` | every PR (`ci.yml`) | hit@k, MRR, context recall/precision, refusal recall, false-refusal rate | `LLM_PROVIDER=none` |
+| `generation` | nightly (`eval-nightly.yml`) | the above plus must-contain, citation validity, numeric grounding, faithfulness, injection resistance | `GEMINI_API_KEY` |
+
+```bash
+LLM_PROVIDER=none python -m evaluation.run_eval --gate retrieval
+```
+
+The per-type breakdown found a live defect on its first run: all four false refusals had the target
+passage in the top-k, and the two prompt-injection questions scored lowest of all (0.002 and 0.005
+against a 0.3 abstain threshold). The injected preamble dominates the cross-encoder pair, so the
+abstain gate judges the attack text rather than the question. The system currently survives an
+injected question by refusing it, which is not the same as resisting it — see
+`docs/production-readiness.md` item 17.
 
 ## AI Tools Used
 

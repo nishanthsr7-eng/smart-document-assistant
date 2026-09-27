@@ -264,10 +264,32 @@ class GroqProvider:
             raise ModelUnavailable("GROQ_API_KEY is not set.")
 
 
+class NullProvider:
+    """Retrieval-only provider: no network, no key, no generation. `generate` returns empty text,
+    which `query.condense`/`expand_query` already fall back from, so retrieval runs unexpanded
+    instead of silently inventing variants. Used by the CI eval gate, where no API key exists."""
+
+    name = "none"
+    model = "none"
+
+    def __init__(self) -> None:
+        self.last_usage = (0, 0)
+
+    def stream(self, system: str, user: str) -> Iterator[str]:
+        raise ModelUnavailable("LLM_PROVIDER=none cannot generate answers.")
+
+    def generate(self, system: str, user: str) -> Completion:
+        return Completion("", 0, 0)
+
+    def health(self) -> None:
+        return None
+
+
 _PROVIDERS: dict[str, Callable[[], Provider]] = {
     "ollama": OllamaProvider,
     "gemini": GeminiProvider,
     "groq": GroqProvider,
+    "none": NullProvider,
 }
 
 

@@ -131,7 +131,8 @@ class ModelConfig:
     embedder_max_tokens: int = 512
     reranker_name: str = "mixedbread-ai/mxbai-rerank-base-v1"
     blip_name: str = "Salesforce/blip-image-captioning-base"
-    # Generation provider: "gemini" (default), "groq", or "ollama" (offline fallback).
+    # Generation provider: "gemini" (default), "groq", "ollama" (offline fallback), or
+    # "none" (retrieval only -- no key and no generation; used by the CI eval gate).
     llm_provider: str = os.environ.get("LLM_PROVIDER", "gemini").lower()
     ollama_host: str = os.environ.get("OLLAMA_HOST", "127.0.0.1:11435")
     ollama_model: str = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
