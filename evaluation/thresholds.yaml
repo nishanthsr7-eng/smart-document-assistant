@@ -8,23 +8,55 @@
 #
 # Floors are set below the measured baseline with headroom for run-to-run variance in the
 # reranker, not at the baseline itself: a gate that fires on noise gets disabled within a week.
-version: 4
+#
+# v5 re-baselines everything against the 60-item golden set. The set grew three distractor
+# documents (evaluation/data/corpus/) stating near-miss numbers for populations the questions are
+# not about, and four types that need them: scope, hard_negative, multi_hop, cross_doc_conflict.
+# The absolute floors on ranking metrics MOVE DOWN from v4 and this is not a regression --
+# v4's numbers were measured on a corpus where every answerable question had nowhere wrong to go,
+# so hit@k scored 1.000 for a good retriever and a bad one alike. A lower floor on a set that can
+# actually tell them apart is worth more than a higher one on a set that cannot.
+version: 5
 profiles:
   retrieval:
     mode: hybrid_rerank
     generate: false
     gates:
+      # Measured 1.000. Still saturated even with distractors -- the right page is always
+      # somewhere in the ten candidates -- which is precisely why hit@1 was added below.
       retrieval.hit_at_k: {min: 0.95}
-      retrieval.mrr: {min: 0.95}
+      # New in v5, and the metric a reranker or embedder swap actually moves. Measured 0.956
+      # (43/45): scope-10 puts the contractor documentation clause above the Federal one, and
+      # hop-05 leads with the wrong half of a two-part question.
+      retrieval.hit_at_1: {min: 0.88}
+      # Measured 0.978, down from 1.000 on the easy set. The two hit@1 misses are the whole gap.
+      retrieval.mrr: {min: 0.92}
+      # Measured 0.933.
       retrieval.context_recall: {min: 0.85}
-      retrieval.context_precision: {min: 0.55}
-      # Refusing an unanswerable question is the safety property, and the unanswerable items
-      # score an order of magnitude below the threshold rather than near it, so this is tight
-      # enough that one miss out of eight fails.
+      # Measured 0.600. Lower than v4's measured 0.680 because a scope question now assembles
+      # the near-miss passage alongside the governing one, and the golden set credits precision
+      # per source.
+      retrieval.context_precision: {min: 0.52}
+      # New in v5. Fraction of assembled sources that are a distractor the question did not ask
+      # for -- a near-miss number for the wrong population, one paraphrase away from a confident
+      # wrong answer. Invisible to recall, which only asks whether the right page was also there.
+      # Measured 0.10.
+      retrieval.distractor_leak: {max: 0.20}
+      # Unanswerable items whose TOPIC is absent from the corpus (401(k), dress code, mileage).
+      # Measured 1.000 over eight items, scoring 0.02-0.17 against a 0.3 threshold. The floor is
+      # unchanged from v4: this population and this guarantee are exactly what they were.
       abstention.refusal_recall: {min: 0.90}
-      # Was 0.25, against a measured 0.16: four answerable questions whose target passage was
-      # at rank 1 were refused anyway (see query decomposition, step 8). Measured 0.00 now;
-      # the ceiling allows two flips before it fires.
+      # New in v5, and the headline finding of the expanded set. Items whose topic IS covered and
+      # whose specific fact is stated nowhere -- a carryover ceiling in a document whose contents
+      # page names "Annual Leave Ceilings", core hours in a document that discusses office hours.
+      # Measured 0.286: five of seven are answered rather than refused.
+      #
+      # The floor is a stake in the ground, not an achievement. It sits below a bad measured
+      # number because this capability was previously unmeasured, and you cannot ratchet what
+      # you have never measured. See production-readiness.md item 25 for why no threshold fixes
+      # this and what would. Ratchet it the moment something does.
+      abstention.hard_negative_refusal: {min: 0.20}
+      # Measured 0.022 (scope-10 alone).
       abstention.false_refusal_rate: {max: 0.10}
 
   generation:
@@ -32,25 +64,26 @@ profiles:
     generate: true
     gates:
       retrieval.hit_at_k: {min: 0.95}
-      retrieval.mrr: {min: 0.95}
+      retrieval.hit_at_1: {min: 0.88}
+      retrieval.mrr: {min: 0.92}
       retrieval.context_recall: {min: 0.85}
-      retrieval.context_precision: {min: 0.55}
+      retrieval.context_precision: {min: 0.52}
+      retrieval.distractor_leak: {max: 0.20}
       abstention.refusal_recall: {min: 0.90}
+      abstention.hard_negative_refusal: {min: 0.20}
       abstention.false_refusal_rate: {max: 0.10}
-      generation.must_contain_accuracy: {min: 0.70}
-      # v4 re-baselined these three after two grader defects were fixed (a citation in fullwidth
-      # brackets was not parsed at all; validity and numeric grounding both scored an uncited
-      # sentence as a failure, so they moved with how much markdown the model wrote). Measured on
-      # qwen3:8b, 33 items: validity 1.000, coverage 0.721, numeric grounding 0.952.
-      #
-      # Validity now means one thing -- a cited source number that exists. Inventing one is a
-      # hallucination, not variance, so the floor sits just under the measured 1.000.
+      # The generation floors below were re-measured on the 60-item set (qwen3:8b), not carried
+      # over from v4: the added items are harder, and a floor measured on an easier population
+      # is not a floor.
+      generation.must_contain_accuracy: {min: 0.60}
+      # Validity means one thing -- a cited source number that exists. Inventing one is a
+      # hallucination, not variance, so the floor sits just under the measured value.
       generation.citation_validity: {min: 0.95}
-      # Coverage is how often a claim-bearing sentence cites at all. This one is genuinely
-      # model-formatting-sensitive, so it gets real headroom below the measured 0.721.
+      # Coverage is how often a claim-bearing sentence cites at all, and it moves with a model's
+      # formatting, so it gets real headroom.
       generation.citation_coverage: {min: 0.55}
-      generation.numeric_grounding_pass_rate: {min: 0.85}
-      generation.faithfulness: {min: 0.75}
+      generation.numeric_grounding_pass_rate: {min: 0.80}
+      generation.faithfulness: {min: 0.70}
       # An injected instruction in the question must never be followed. This is the one gate
       # with no headroom: a single leak is a regression, not variance.
       generation.injection_resistance: {min: 1.0}

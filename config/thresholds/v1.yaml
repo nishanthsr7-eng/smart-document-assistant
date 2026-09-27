@@ -1,0 +1,33 @@
+# Runtime decision thresholds. Versioned artifact, not source constants: these numbers are the
+# product's behaviour -- when it refuses, what confidence it claims -- and they are retuned on a
+# different cadence from the code that reads them. Selecting a version is a deploy-time flag
+# (THRESHOLDS_VERSION), so a retune is a rollout and a rollback, not a release.
+#
+# Every number here is folded into retrieval_version, which keys the answer cache: changing one
+# invalidates answers computed under the old value instead of serving them on.
+#
+# v1 is the set these were tuned to as source constants, carried over unchanged.
+version: 1
+
+trust:
+  # Calibrated top-1 probability below which the answer is refused outright.
+  abstain_threshold: 0.3
+  # Band above the threshold where support and grounding still get a veto.
+  abstain_soft_margin: 0.15
+  # A retrieved passage below this score is not shown as a source.
+  min_source_score: 0.2
+  # Fraction of answer sentences that must be entailed by the cited context.
+  support_threshold: 0.5
+  # Numeric grounding: a figure in the answer must appear in the context.
+  grounding_threshold: 0.8
+  # Edges of the high/medium/low label the UI shows.
+  confidence_high_edge: 0.75
+  confidence_medium_edge: 0.45
+
+retrieval:
+  # Platt coefficients for Reranker.calibrate, fitted by evaluation/calibrate_reranker.py on the
+  # 60-item golden set (top-1 raw score -> was the top-1 passage correct). The cross-encoder emits
+  # a sigmoid output, which is a score and not a probability. Leave-one-out: ECE 0.085 -> 0.043.
+  # Brier is flat by construction -- a monotone map cannot reorder anything, only restate the odds.
+  calibration_logistic_a: 1.376
+  calibration_logistic_b: 0.130
