@@ -1,5 +1,6 @@
 import pytest
 
+from evaluation import run_eval
 from evaluation.run_eval import (
     _by_type,
     _injection_resistance,
@@ -20,6 +21,20 @@ def _answer(text: str, suggestions: list[str] | None = None) -> Answer:
         trace=Trace(tenant_id="t", user_id="u"),
         hits=[],
         suggestions=[Suggestion(text=s) for s in (suggestions or [])],
+    )
+
+
+def _answer_with(sources: int, sentences: list[tuple[list[int], str]]) -> Answer:
+    from src.generation.answerer import Source
+
+    return Answer(
+        status="answered",
+        sentences=[Sentence(text=text, cites=cites) for cites, text in sentences],
+        sources=[
+            Source(i, "f.pdf", "1", "", "source text", (0, 4), 0.9) for i in range(1, sources + 1)
+        ],
+        trace=Trace(tenant_id="t", user_id="u"),
+        hits=[],
     )
 
 
@@ -104,3 +119,27 @@ def test_null_provider_generates_nothing_and_needs_no_key():
     client = NullProvider()
     client.health()
     assert client.generate("s", "u").text == ""
+
+
+def test_citation_validity_scores_only_citing_sentences():
+    answer = _answer_with(
+        sources=2,
+        sentences=[([1], "A cited claim about leave accrual rates."), ([], "A heading")],
+    )
+    # The uncited fragment is not a validity failure; it is a coverage one.
+    assert run_eval._citation_validity(answer) == [1.0]
+    assert run_eval._citation_coverage(answer) == [1.0]
+
+
+def test_citation_validity_catches_an_invented_source_number():
+    answer = _answer_with(sources=2, sentences=[([5], "A claim citing a source that does not exist.")])
+    assert run_eval._citation_validity(answer) == [0.0]
+
+
+def test_citation_coverage_counts_an_uncited_claim():
+    answer = _answer_with(
+        sources=2,
+        sentences=[([], "A full sentence making a factual claim with no citation.")],
+    )
+    assert run_eval._citation_coverage(answer) == [0.0]
+    assert run_eval._citation_validity(answer) == []

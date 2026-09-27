@@ -572,39 +572,50 @@ straight out of Redis and reported an identical gate. `SETTINGS.retrieval_versio
 threshold invalidates exactly the answers it invalidates, and an evaluation run measures the code
 it is running.
 
-**The `generation` profile, run for the first time on a real provider, and it is not all good
-news.** `openai/gpt-oss-120b` on Groq, 33 items (the Gemini free tier's 20 requests/day ran out
-mid-run, and the configured Groq model `llama-3.3-70b-versatile` no longer exists for this key --
-the default is now a model the API actually serves):
+**The `generation` profile, run for the first time on a real provider, failed -- and the failure
+was the grader, twice over.** First run, `openai/gpt-oss-120b` on Groq: citation validity 0.447
+against a 0.65 floor, numeric grounding 0.414 against 0.80. Attributed by re-running the same
+profile against `31393da`, same provider, same grader, cache flushed: **0.030 and 0.040 before**
+this change, so step 8 improved both by an order of magnitude and neither failure was its doing.
+Worth noting what the before-run's `injection_resistance: 1.000` meant there -- both injected
+questions were refused (`correct_abstention` 0.000 on that type), so the metric was passing on an
+abstention. Exactly the criticism item 17 made of it.
 
-| Metric | Value | Gate | |
+Three defects came out of reading the answers instead of the aggregates:
+
+1. **Citations in fullwidth brackets were not parsed at all.** The model writes `【1】`,
+   `_CITE_RE` matched only `[1]`, so a real citation was dropped: the sentence showed as uncited
+   in the UI, failed validation, and dragged confidence down with it. A product bug the metric
+   was reporting faithfully. `CITE_PATTERN` now covers the CJK and fullwidth forms.
+2. **Citation validity conflated two failures.** A sentence with no `[n]` scored the same as a
+   sentence citing a source that does not exist, so the number mostly tracked how much markdown
+   the model wrote. It is now the hallucinated-citation detector only -- of the sentences that
+   cite, the fraction whose numbers exist -- and `citation_coverage` is its own metric: of the
+   sentences making a claim, the fraction that cite at all. Claim-bearing uses the same rule as
+   `faithfulness`, so the three are scored over the same population.
+3. **Numeric grounding had the identical flaw**, scoring an uncited number as ungrounded, which
+   counted one uncited sentence as two separate failures. It is now scored over citing sentences.
+
+Re-baselined on `qwen3:8b` (both free-tier hosted providers hit their daily caps mid-run; this is
+also the model the original floors were set against, so it is the fair comparison), 33 items, with
+all three fixes:
+
+| Metric | Old grader | Fixed grader | Floor (v4) |
 |---|---|---|---|
-| generation.must_contain_accuracy | 0.913 | min 0.70 | pass |
-| generation.faithfulness | 0.907 | min 0.75 | pass |
-| generation.injection_resistance | 1.000 | min 1.00 | pass |
-| generation.citation_validity | 0.447 | min 0.65 | **FAIL** |
-| generation.numeric_grounding_pass_rate | 0.414 | min 0.80 | **FAIL** |
+| generation.must_contain_accuracy | 0.720 | 0.840 | 0.70 |
+| generation.citation_validity | 0.030-0.447 | **1.000** | 0.95 |
+| generation.citation_coverage | not measured | 0.721 | 0.55 |
+| generation.numeric_grounding_pass_rate | 0.750 | **0.952** | 0.85 |
+| generation.faithfulness | 0.816 | 0.875 | 0.75 |
+| generation.injection_resistance | 1.000 | 1.000 | 1.00 |
 
-The one this step could have broken is the one to look at first: `injection_resistance` is 1.000
-*and* the injection items now score `must_contain` 1.000, so those two questions are answered
-correctly from the documents with no leak, rather than refused. That is the difference between
-resisting an injection and surviving one, and it is now measured rather than asserted.
+The profile passes. Validity's floor is tight at 0.95 because it now means one thing and inventing
+a source number is a hallucination rather than variance; coverage gets real headroom at 0.55
+because it is the one of the three that legitimately moves with a model's formatting.
 
-`must_contain` was 0.522 on the first run of this profile and the gap was the grader, not the
-answers: the model writes `4‑hours` with a non-breaking hyphen and a literal substring check
-scored a correct answer wrong. `_normalize` in `run_eval.py` now folds dash and space variants on
-both sides of the comparison, which moved it to 0.913. Worth stating plainly because it cuts both
-ways: a metric can under-report as easily as a model can under-perform, and only reading the
-actual answers tells you which.
-
-The two failures are unattributed and stay failures. Both are plausibly provider formatting --
-`citation_validity` scores a sentence with no `[n]` marker as 0, and this model writes markdown
-headings and bullet fragments that parse as sentences -- and the floors were set against a
-`qwen3:8b` run (0.750 / 1.000) recorded in the README, not against this model. But "plausibly the
-provider" is not a measurement: there is no same-provider before-run to compare against, because
-this profile had never been run on a real provider until now. The next step is that comparison,
-not a lowered floor. Lowering a gate to match the run it just failed is how gates stop meaning
-anything.
+The lesson is the one worth keeping: the failing gate was read as "the model is bad", and it was
+actually one product bug and two metrics measuring formatting. Aggregates said which questions
+failed; only the answer text said why.
 
 Not done: `Reranker.calibrate` is still the identity (a/b unfitted), the abstain threshold has not
 been re-swept against the new score distribution, and sub-query splitting is rule-based -- an LLM

@@ -170,17 +170,44 @@ def _must_contain_pass(item: GoldenItem, answer: Answer) -> float:
     return 1.0 if all(_normalize(e.must_contain) in answer_text for e in item.expected) else 0.0
 
 
+# A sentence short enough to be a heading or a list fragment carries no claim to cite. Same rule
+# as _faithfulness, so the two metrics are scored over the same population.
+_MIN_CLAIM_WORDS = 4
+
+
+def _claim_sentences(answer: Answer) -> list:
+    return [s for s in answer.sentences if len(s.text.split()) >= _MIN_CLAIM_WORDS]
+
+
 def _citation_validity(answer: Answer) -> list[float]:
+    """Of the sentences that cite, the fraction whose source numbers all exist.
+
+    This is the hallucinated-citation detector, and nothing else. It used to score an uncited
+    sentence as 0, which conflated two different failures -- inventing a source number, and not
+    citing at all -- into one number that mostly moved with how much markdown the model wrote.
+    Coverage is now its own metric below.
+    """
     valid_ids = set(range(1, len(answer.sources) + 1))
-    return [1.0 if s.cites and set(s.cites) <= valid_ids else 0.0 for s in answer.sentences]
+    return [1.0 if set(s.cites) <= valid_ids else 0.0 for s in answer.sentences if s.cites]
+
+
+def _citation_coverage(answer: Answer) -> list[float]:
+    """Of the sentences that make a claim, the fraction that cite at least one source."""
+    return [1.0 if s.cites else 0.0 for s in _claim_sentences(answer)]
 
 
 def _numeric_grounding(answer: Answer) -> list[float]:
+    """Of the numbers in a *cited* sentence, whether each appears in the source it cites.
+
+    Scored over citing sentences only, for the same reason as _citation_validity: an uncited
+    number scored 0 here and 0 there, so one uncited sentence was being counted as two separate
+    failures and both numbers moved with formatting. Not citing is _citation_coverage's job.
+    """
     source_text = {s.id: _normalize(s.text) for s in answer.sources}
     results = []
     for sentence in answer.sentences:
         numbers = _NUMBER_RE.findall(_normalize(sentence.text))
-        if not numbers:
+        if not numbers or not sentence.cites:
             continue
         cited_text = " ".join(source_text.get(c, "") for c in sentence.cites)
         results.append(1.0 if all(n in cited_text for n in numbers) else 0.0)
@@ -196,19 +223,15 @@ def _injection_resistance(answer: Answer) -> float:
 
 
 def _faithfulness(answer: Answer, reranker: Reranker) -> float | None:
-    """Fraction of answer sentences supported by at least one source.
+    """Fraction of claim-bearing answer sentences supported by at least one source.
     Uses the reranker to score each sentence against all source texts.
-    Sentences without factual claims (no nouns/verbs) are skipped.
     """
     if not answer.sentences or not answer.sources:
         return None
     all_source_text = [s.text for s in answer.sources]
     supported = 0
     total = 0
-    for sent in answer.sentences:
-        words = sent.text.split()
-        if len(words) < 4:
-            continue
+    for sent in _claim_sentences(answer):
         total += 1
         pairs = [(sent.text, src) for src in all_source_text]
         scores = reranker.score(pairs)
@@ -307,6 +330,7 @@ def run(mode: str, generate: bool) -> dict:
     context_recall, context_precision = [], []
     must_contain = []
     citation_validity = []
+    citation_coverage = []
     numeric_grounding = []
     faithfulness = []
     injection_resistance = []
@@ -366,6 +390,7 @@ def run(mode: str, generate: bool) -> dict:
                 must_contain.append(pass_rate)
                 record["must_contain"] = pass_rate
             citation_validity.extend(_citation_validity(answer))
+            citation_coverage.extend(_citation_coverage(answer))
             numeric_grounding.extend(_numeric_grounding(answer))
             faith = _faithfulness(answer, reranker)
             if faith is not None:
@@ -401,6 +426,7 @@ def run(mode: str, generate: bool) -> dict:
         "generation": {
             "must_contain_accuracy": _mean(must_contain),
             "citation_validity": _mean(citation_validity),
+            "citation_coverage": _mean(citation_coverage),
             "numeric_grounding_pass_rate": _mean(numeric_grounding),
             "faithfulness": _mean(faithfulness),
             "injection_resistance": _mean(injection_resistance),

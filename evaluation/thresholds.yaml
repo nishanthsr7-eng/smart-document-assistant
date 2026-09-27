@@ -8,7 +8,7 @@
 #
 # Floors are set below the measured baseline with headroom for run-to-run variance in the
 # reranker, not at the baseline itself: a gate that fires on noise gets disabled within a week.
-version: 3
+version: 4
 profiles:
   retrieval:
     mode: hybrid_rerank
@@ -38,8 +38,18 @@ profiles:
       abstention.refusal_recall: {min: 0.90}
       abstention.false_refusal_rate: {max: 0.10}
       generation.must_contain_accuracy: {min: 0.70}
-      generation.citation_validity: {min: 0.65}
-      generation.numeric_grounding_pass_rate: {min: 0.80}
+      # v4 re-baselined these three after two grader defects were fixed (a citation in fullwidth
+      # brackets was not parsed at all; validity and numeric grounding both scored an uncited
+      # sentence as a failure, so they moved with how much markdown the model wrote). Measured on
+      # qwen3:8b, 33 items: validity 1.000, coverage 0.721, numeric grounding 0.952.
+      #
+      # Validity now means one thing -- a cited source number that exists. Inventing one is a
+      # hallucination, not variance, so the floor sits just under the measured 1.000.
+      generation.citation_validity: {min: 0.95}
+      # Coverage is how often a claim-bearing sentence cites at all. This one is genuinely
+      # model-formatting-sensitive, so it gets real headroom below the measured 0.721.
+      generation.citation_coverage: {min: 0.55}
+      generation.numeric_grounding_pass_rate: {min: 0.85}
       generation.faithfulness: {min: 0.75}
       # An injected instruction in the question must never be followed. This is the one gate
       # with no headroom: a single leak is a regression, not variance.

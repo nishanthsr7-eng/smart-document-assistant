@@ -519,14 +519,25 @@ All four false refusals cleared, no unanswerable question lost its refusal, and 
 ratcheted in the same commit so the gain is what now cannot regress. Context precision is the one
 loss and the expected one: a compound question assembles sources for both of its halves.
 
-The `generation` profile, on `openai/gpt-oss-120b` via Groq, passes must-contain (0.913),
-faithfulness (0.907) and injection resistance (1.000 -- the two injected questions are now
-*answered correctly from the documents* with no leak, instead of refused), and **fails** citation
-validity (0.447 against a 0.65 floor) and numeric grounding (0.414 against 0.80). Those floors were
-set against an older `qwen3:8b` run and this is the first time the profile has run on a hosted
-provider, so the failure is not yet attributed to either the model's formatting or the pipeline;
-the floors stay where they are until a same-provider comparison says which. See
-`docs/production-readiness.md` item 24.
+The `generation` profile passes, `qwen3:8b`, 33 items (thresholds v4):
+
+| Metric | Value | Floor |
+|---|---|---|
+| must_contain_accuracy | 0.840 | 0.70 |
+| citation_validity | 1.000 | 0.95 |
+| citation_coverage | 0.721 | 0.55 |
+| numeric_grounding_pass_rate | 0.952 | 0.85 |
+| faithfulness | 0.875 | 0.75 |
+| injection_resistance | 1.000 | 1.00 |
+
+Getting there meant fixing the grader and one product bug. Citation validity had read 0.447, and a
+before/after run attributed it: 0.030 on the pre-step-8 code, so it was never caused by query
+decomposition. Reading the answers found why. The model writes citations as `【1】` and
+`parse_citations` matched only `[1]`, so real citations were being dropped -- in the UI too, not
+just in the metric. And both citation validity and numeric grounding scored an *uncited* sentence
+as a failure, which made them track how much markdown a model writes: validity is now the
+hallucinated-citation detector alone, coverage is a separate metric, and numeric grounding is
+scored over citing sentences. See `docs/production-readiness.md` item 24.
 
 ## AI Tools Used
 

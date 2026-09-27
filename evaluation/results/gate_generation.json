@@ -51,15 +51,16 @@
       "context_precision": 0.68
     },
     "abstention": {
-      "refusal_precision": 0.8,
+      "refusal_precision": 1.0,
       "refusal_recall": 1.0,
-      "false_refusal_rate": 0.08
+      "false_refusal_rate": 0.0
     },
     "generation": {
-      "must_contain_accuracy": 0.9130434782608695,
-      "citation_validity": 0.44680851063829785,
-      "numeric_grounding_pass_rate": 0.41379310344827586,
-      "faithfulness": 0.9072463768115943,
+      "must_contain_accuracy": 0.84,
+      "citation_validity": 1.0,
+      "citation_coverage": 0.7209302325581395,
+      "numeric_grounding_pass_rate": 0.9523809523809523,
+      "faithfulness": 0.875,
       "injection_resistance": 1.0
     },
     "by_type": {
@@ -67,7 +68,7 @@
         "n": 6,
         "correct_abstention": 1.0,
         "hit_at_k": 1.0,
-        "must_contain": 0.8333333333333334
+        "must_contain": 1.0
       },
       "table": {
         "n": 2,
@@ -85,7 +86,7 @@
         "n": 5,
         "correct_abstention": 1.0,
         "hit_at_k": 1.0,
-        "must_contain": 0.8
+        "must_contain": 0.6
       },
       "conflict": {
         "n": 2,
@@ -95,9 +96,9 @@
       },
       "multi_doc": {
         "n": 5,
-        "correct_abstention": 0.6,
+        "correct_abstention": 1.0,
         "hit_at_k": 1.0,
-        "must_contain": 1.0
+        "must_contain": 0.6
       },
       "unanswerable": {
         "n": 8,
@@ -114,28 +115,28 @@
     },
     "latency_s": {
       "Searching": {
-        "p50": 1.3368479999990086,
-        "p95": 6.065183000006073
+        "p50": 2.369147499994142,
+        "p95": 4.502933099996881
       },
       "Reranking": {
-        "p50": 13.278288999994402,
-        "p95": 42.7988886000021
+        "p50": 13.790193400011049,
+        "p95": 46.17560050000611
       },
       "Assembling": {
-        "p50": 0.02127219999965746,
-        "p95": 1.084523800003808
+        "p50": 0.021064700005808845,
+        "p95": 0.02990630001295358
       },
       "Generating": {
-        "p50": 1.2877297999948496,
-        "p95": 6.047145600001386
+        "p50": 4.460457299996051,
+        "p95": 6.491296499996679
       },
       "Validating": {
-        "p50": 7.819999882485718e-05,
-        "p95": 16.90743780000048
+        "p50": 5.839189399994211,
+        "p95": 15.68332029999874
       },
       "Abstaining": {
-        "p50": 4.389999958220869e-05,
-        "p95": 4.600000102072954e-05
+        "p50": 4.75000124424696e-05,
+        "p95": 5.2799994591623545e-05
       }
     },
     "items": [
@@ -215,7 +216,7 @@
         "context_recall": 1.0,
         "context_precision": 1.0,
         "must_contain": 1.0,
-        "faithfulness": 0.7
+        "faithfulness": 0.875
       },
       {
         "id": "eh-01",
@@ -266,7 +267,7 @@
         "mrr": 1.0,
         "context_recall": 1.0,
         "context_precision": 0.25,
-        "must_contain": 1.0,
+        "must_contain": 0.0,
         "faithfulness": 1.0
       },
       {
@@ -293,7 +294,7 @@
         "context_recall": 1.0,
         "context_precision": 1.0,
         "must_contain": 1.0,
-        "faithfulness": 0.6666666666666666
+        "faithfulness": 1.0
       },
       {
         "id": "cp-01",
@@ -363,13 +364,15 @@
       {
         "id": "multi-03",
         "type": "multi_doc",
-        "status": "abstained",
-        "abstain_reason": "The answer isn't supported by the selected documents.",
+        "status": "answered",
+        "abstain_reason": null,
         "top_score": 0.879871129989624,
         "hit_at_k": 1.0,
         "mrr": 1.0,
         "context_recall": 0.5,
-        "context_precision": 0.3333333333333333
+        "context_precision": 0.3333333333333333,
+        "must_contain": 0.0,
+        "faithfulness": 0.5
       },
       {
         "id": "unans-01",
@@ -396,22 +399,22 @@
         "id": "unans-04",
         "type": "unanswerable",
         "status": "abstained",
-        "abstain_reason": "The best-matching passage scored 0.04, below the trust threshold.",
-        "top_score": 0.04146227240562439
+        "abstain_reason": "The best-matching passage scored 0.09, below the trust threshold.",
+        "top_score": 0.09417666494846344
       },
       {
         "id": "unans-05",
         "type": "unanswerable",
         "status": "abstained",
-        "abstain_reason": "The best-matching passage scored 0.05, below the trust threshold.",
-        "top_score": 0.05098814517259598
+        "abstain_reason": "The best-matching passage scored 0.02, below the trust threshold.",
+        "top_score": 0.015543648041784763
       },
       {
         "id": "unans-06",
         "type": "unanswerable",
         "status": "abstained",
-        "abstain_reason": "The best-matching passage scored 0.02, below the trust threshold.",
-        "top_score": 0.016029147431254387
+        "abstain_reason": "The best-matching passage scored 0.01, below the trust threshold.",
+        "top_score": 0.012870748527348042
       },
       {
         "id": "cp-04",
@@ -424,7 +427,7 @@
         "context_recall": 1.0,
         "context_precision": 1.0,
         "must_contain": 1.0,
-        "faithfulness": 0.5
+        "faithfulness": 0.0
       },
       {
         "id": "cp-05",
@@ -436,7 +439,7 @@
         "mrr": 1.0,
         "context_recall": 1.0,
         "context_precision": 1.0,
-        "must_contain": 0.0,
+        "must_contain": 1.0,
         "faithfulness": 1.0
       },
       {
@@ -468,20 +471,22 @@
       {
         "id": "multi-05",
         "type": "multi_doc",
-        "status": "abstained",
-        "abstain_reason": "The answer isn't supported by the selected documents.",
+        "status": "answered",
+        "abstain_reason": null,
         "top_score": 0.9905508756637573,
         "hit_at_k": 1.0,
         "mrr": 1.0,
         "context_recall": 0.5,
-        "context_precision": 0.6666666666666666
+        "context_precision": 0.6666666666666666,
+        "must_contain": 0.0,
+        "faithfulness": 0.5
       },
       {
         "id": "unans-07",
         "type": "unanswerable",
         "status": "abstained",
         "abstain_reason": "The best-matching passage scored 0.17, below the trust threshold.",
-        "top_score": 0.1695433259010315
+        "top_score": 0.16830945014953613
       },
       {
         "id": "unans-08",
@@ -558,35 +563,35 @@
     },
     {
       "metric": "abstention.false_refusal_rate",
-      "value": 0.08,
+      "value": 0.0,
       "bound": "max",
       "limit": 0.1,
       "passed": true
     },
     {
       "metric": "generation.must_contain_accuracy",
-      "value": 0.9130434782608695,
+      "value": 0.84,
       "bound": "min",
       "limit": 0.7,
       "passed": true
     },
     {
       "metric": "generation.citation_validity",
-      "value": 0.44680851063829785,
+      "value": 1.0,
       "bound": "min",
       "limit": 0.65,
-      "passed": false
+      "passed": true
     },
     {
       "metric": "generation.numeric_grounding_pass_rate",
-      "value": 0.41379310344827586,
+      "value": 0.9523809523809523,
       "bound": "min",
       "limit": 0.8,
-      "passed": false
+      "passed": true
     },
     {
       "metric": "generation.faithfulness",
-      "value": 0.9072463768115943,
+      "value": 0.875,
       "bound": "min",
       "limit": 0.75,
       "passed": true

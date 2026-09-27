@@ -66,7 +66,11 @@ DIDYOUMEAN_SYSTEM = (
 )
 
 _TAG_RE = re.compile(r"<[^>]*source[^>]*>", re.IGNORECASE)
-_CITE_RE = re.compile(r"\[(\d+)\]")
+# Bracket variants, not just ASCII: models emit fullwidth and CJK brackets ("【1】") often
+# enough that matching only "[1]" silently drops a citation the model did make -- the sentence
+# then shows as uncited in the UI and scores as ungrounded.
+CITE_PATTERN = r"[\[【〔［]\s*(\d+)\s*[\]】〕］]"
+_CITE_RE = re.compile(CITE_PATTERN)
 
 _FORMAT_HINTS = {
     "comparison": "Present the answer as a compact markdown table comparing the items.",
