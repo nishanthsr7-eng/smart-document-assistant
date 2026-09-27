@@ -61,3 +61,4 @@ def test_merge_dense_keeps_best_score_per_chunk():
 def test_merge_dense_respects_k():
     hits = [[_hit(str(i), 1.0 - i * 0.1) for i in range(5)]]
     assert len(merge_dense(hits, k=3)) == 3
+

@@ -101,11 +101,41 @@ def parse_txt(data: bytes) -> list[Element]:
 
 
 def parse_pdf(data: bytes, captioner: Optional[FigureCaptioner] = None) -> list[Element]:
-    pages_text = _preflight_pdf(data)
+    pages_text, scanned = _preflight_pdf(data)
+    if scanned:
+        return _parse_scanned_pdf(data, len(pages_text), captioner)
+
     fast = _try_fast_pdf(pages_text)
     if fast:
         return fast
+    return _parse_with_docling(data, captioner, ocr=False)
 
+
+def _parse_scanned_pdf(
+    data: bytes, page_count: int, captioner: Optional[FigureCaptioner]
+) -> list[Element]:
+    """A PDF with no text layer is read by OCR rather than refused.
+
+    Scanned documents are a large fraction of real enterprise corpora, so rejecting them
+    rejects the corpus. The page cap is separate from max_pages because OCR is an order of
+    magnitude slower than reading a text layer, and a job that cannot finish inside its timeout
+    should fail at validation with a reason rather than time out in the worker.
+    """
+    if not SETTINGS.ingestion.ocr_enabled:
+        raise ScannedDocument("OCR is disabled on this deployment (OCR_ENABLED=0).")
+    if page_count > SETTINGS.ingestion.ocr_max_pages:
+        raise ScannedDocument(
+            f"OCR is limited to {SETTINGS.ingestion.ocr_max_pages} pages and this document has {page_count}."
+        )
+    try:
+        return _parse_with_docling(data, captioner, ocr=True)
+    except EmptyDocument as exc:
+        raise ScannedDocument() from exc
+
+
+def _parse_with_docling(
+    data: bytes, captioner: Optional[FigureCaptioner], ocr: bool
+) -> list[Element]:
     from docling_core.types.doc.document import (
         ListItem,
         PictureItem,
@@ -114,7 +144,7 @@ def parse_pdf(data: bytes, captioner: Optional[FigureCaptioner] = None) -> list[
         TextItem,
     )
 
-    result = _converter().convert(_docling_source(data))
+    result = _converter(ocr).convert(_docling_source(data))
     doc = result.document
 
     elements: list[Element] = []
@@ -163,7 +193,7 @@ def parse_pdf(data: bytes, captioner: Optional[FigureCaptioner] = None) -> list[
     return elements
 
 
-def _preflight_pdf(data: bytes) -> list[tuple[int, str]]:
+def _preflight_pdf(data: bytes) -> tuple[list[tuple[int, str]], bool]:
     from pypdf import PdfReader
     from pypdf.errors import PdfReadError
 
@@ -185,9 +215,8 @@ def _preflight_pdf(data: bytes) -> list[tuple[int, str]]:
         text = (page.extract_text() or "").strip()
         total_chars += len(text)
         pages_text.append((i, text))
-    if page_count and total_chars / page_count < SETTINGS.ingestion.min_chars_per_page:
-        raise ScannedDocument()
-    return pages_text
+    scanned = bool(page_count) and total_chars / page_count < SETTINGS.ingestion.min_chars_per_page
+    return pages_text, scanned
 
 
 _FAST_PDF_MIN_CHARS_PER_PAGE = 200
@@ -223,15 +252,19 @@ def _try_fast_pdf(pages_text: list[tuple[int, str]]) -> Optional[list[Element]]:
     return elements
 
 
-@lru_cache(maxsize=1)
-def _converter():
+@lru_cache(maxsize=2)
+def _converter(ocr: bool = False):
     from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
     options = PdfPipelineOptions()
     options.artifacts_path = str(SETTINGS.paths.models)
-    options.do_ocr = False
+    options.do_ocr = ocr
+    if ocr:
+        # RapidOCR: ONNX Runtime, ~30 MB of weights, no system package and no GPU. Baked into
+        # the image alongside the other artifacts, so an OCR ingest does not reach the network.
+        options.ocr_options = RapidOcrOptions()
     options.do_table_structure = True
     options.generate_picture_images = True
     options.do_picture_classification = True

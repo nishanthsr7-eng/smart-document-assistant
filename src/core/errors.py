@@ -15,8 +15,8 @@ class EmptyDocument(DocumentError):
 
 
 class ScannedDocument(DocumentError):
-    def __init__(self) -> None:
-        super().__init__("This looks like a scanned document with no text layer. OCR isn't supported.")
+    def __init__(self, reason: str = "OCR could not read any text from it.") -> None:
+        super().__init__(f"This looks like a scanned document with no text layer. {reason}")
 
 
 class UnsupportedFormat(DocumentError):

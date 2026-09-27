@@ -1,0 +1,128 @@
+{
+  "filename": "leave_policy.pdf",
+  "mode": "hybrid_rerank",
+  "num_items": 7,
+  "raster_scale": 2.0,
+  "pages": 13,
+  "ocr_ingest_seconds": 122.6,
+  "chunks": {
+    "text_layer": 78,
+    "ocr": 92
+  },
+  "text_layer": {
+    "hit_at_k": 1.0,
+    "mrr": 1.0,
+    "context_recall": 1.0,
+    "context_precision": 0.7142857142857143,
+    "answered_rate": 1.0,
+    "items": [
+      {
+        "id": "lp-01",
+        "type": "lookup",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-02",
+        "type": "lookup",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-03",
+        "type": "table",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-04",
+        "type": "exact_term",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-05",
+        "type": "paraphrase",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-06",
+        "type": "conflict",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "inj-01",
+        "type": "injection",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      }
+    ]
+  },
+  "ocr": {
+    "hit_at_k": 1.0,
+    "mrr": 1.0,
+    "context_recall": 1.0,
+    "context_precision": 0.6071428571428571,
+    "answered_rate": 1.0,
+    "items": [
+      {
+        "id": "lp-01",
+        "type": "lookup",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-02",
+        "type": "lookup",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-03",
+        "type": "table",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-04",
+        "type": "exact_term",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-05",
+        "type": "paraphrase",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "lp-06",
+        "type": "conflict",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      },
+      {
+        "id": "inj-01",
+        "type": "injection",
+        "status": "retrieved",
+        "hit_at_k": 1.0,
+        "context_recall": 1.0
+      }
+    ]
+  }
+}

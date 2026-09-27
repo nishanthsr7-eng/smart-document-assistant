@@ -91,6 +91,35 @@ def test_parse_pdf_encrypted_raises():
         parse_pdf(_blank_pdf(encrypt="secret"))
 
 
-def test_parse_pdf_scanned_raises():
-    with pytest.raises(ScannedDocument):
+def test_parse_pdf_scanned_raises_when_ocr_disabled(monkeypatch):
+    off = replace(SETTINGS, ingestion=replace(SETTINGS.ingestion, ocr_enabled=False))
+    monkeypatch.setattr(parsers, "SETTINGS", off)
+    with pytest.raises(ScannedDocument, match="disabled"):
         parse_pdf(_blank_pdf(pages=3))
+
+
+def test_parse_pdf_scanned_raises_over_ocr_page_cap(monkeypatch):
+    capped = replace(SETTINGS, ingestion=replace(SETTINGS.ingestion, ocr_max_pages=2))
+    monkeypatch.setattr(parsers, "SETTINGS", capped)
+    with pytest.raises(ScannedDocument, match="limited to 2 pages"):
+        parse_pdf(_blank_pdf(pages=3))
+
+
+def test_scanned_pdf_goes_through_ocr():
+    """A rasterised page has no text layer at all, so every word here came out of OCR."""
+    pdfium = pytest.importorskip("pypdfium2")
+    if not (SETTINGS.paths.models / "RapidOcr").is_dir():
+        pytest.skip("RapidOCR artifacts are not present in data/models")
+
+    source = pdfium.PdfDocument(str(SETTINGS.paths.sample_docs / "leave_policy.pdf"))
+    image = source[0].render(scale=2.0).to_pil().convert("RGB")
+    source.close()
+    buffer = io.BytesIO()
+    image.save(buffer, format="PDF", resolution=144.0)
+    scanned = buffer.getvalue()
+
+    assert parsers._preflight_pdf(scanned)[1] is True
+    elements = parse_pdf(scanned)
+    text = " ".join(e.text for e in elements).lower()
+    assert "leave" in text
+    assert any(e.kind in ("paragraph", "list_item", "table") for e in elements)

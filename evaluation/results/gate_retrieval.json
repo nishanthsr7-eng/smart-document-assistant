@@ -43,6 +43,7 @@
     "generation": {
       "must_contain_accuracy": null,
       "citation_validity": null,
+      "citation_coverage": null,
       "numeric_grounding_pass_rate": null,
       "faithfulness": null,
       "injection_resistance": null
@@ -99,20 +100,20 @@
     },
     "latency_s": {
       "Searching": {
-        "p50": 0.06840589999774238,
-        "p95": 0.1311451000001398
+        "p50": 0.08822869999858085,
+        "p95": 0.24565230000007432
       },
       "Reranking": {
-        "p50": 12.800664499998675,
-        "p95": 40.88607259999844
+        "p50": 19.88591599999927,
+        "p95": 74.32914129999699
       },
       "Assembling": {
-        "p50": 0.03729110000131186,
-        "p95": 0.2823884999961592
+        "p50": 0.02936460000637453,
+        "p95": 0.054437099999631755
       },
       "Abstaining": {
-        "p50": 3.7699996028095484e-05,
-        "p95": 6.230000144569203e-05
+        "p50": 5.339999916031957e-05,
+        "p95": 7.080000068526715e-05
       }
     },
     "items": [
@@ -326,14 +327,14 @@
         "type": "unanswerable",
         "status": "abstained",
         "abstain_reason": "The best-matching passage scored 0.04, below the trust threshold.",
-        "top_score": 0.0398624949157238
+        "top_score": 0.04193052276968956
       },
       {
         "id": "unans-03",
         "type": "unanswerable",
         "status": "abstained",
         "abstain_reason": "The best-matching passage scored 0.01, below the trust threshold.",
-        "top_score": 0.010288300924003124
+        "top_score": 0.009746103547513485
       },
       {
         "id": "unans-04",
@@ -346,8 +347,8 @@
         "id": "unans-05",
         "type": "unanswerable",
         "status": "abstained",
-        "abstain_reason": "The best-matching passage scored 0.03, below the trust threshold.",
-        "top_score": 0.02527489885687828
+        "abstain_reason": "The best-matching passage scored 0.05, below the trust threshold.",
+        "top_score": 0.05098814517259598
       },
       {
         "id": "unans-06",

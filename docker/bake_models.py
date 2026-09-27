@@ -16,3 +16,9 @@ for name in (SETTINGS.models.embedder_name, SETTINGS.models.blip_name):
     snapshot_download(name, cache_dir=HF_HUB)
 snapshot_download(SETTINGS.models.reranker_name, cache_dir=ARTIFACTS)
 subprocess.run(["docling-tools", "models", "download", "-o", ARTIFACTS], check=True)
+# RapidOCR is not part of docling's default set and is only reached when a PDF has no text
+# layer, which is exactly when a network pull would surprise someone: bake it too (~30 MB).
+subprocess.run(
+    ["docling-tools", "models", "download", "rapidocr", "--rapidocr-backend-lang", "onnxruntime:ch", "-o", ARTIFACTS],
+    check=True,
+)

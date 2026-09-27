@@ -615,7 +615,7 @@ that makes the gate able to see it.
 
 ## P2 — Product and retrieval-quality depth
 
-### 19. Retrieval / ML roadmap
+### 19. Retrieval / ML roadmap — **PARTLY DONE**
 - **OCR is missing entirely** — scanned PDFs are rejected outright (`src/core/errors.py:18`). That is
   a large fraction of real enterprise documents. Add Surya or PaddleOCR (or Azure Document
   Intelligence) as a fallback when the text layer is empty.
@@ -636,6 +636,93 @@ that makes the gate able to see it.
 - **Tables**: docling gives structure; preserve it and route table questions to table-QA or
   text-to-SQL instead of flattening to prose.
 - **GraphRAG** for cross-document entity questions, once the corpus justifies it.
+
+**Done: OCR, table structure in the context, and one experiment that failed and was dropped.**
+Step 9 is this list worked through the apparatus steps 1-8 built, which means every attempt owes a
+number and one of them does not get to be shipped on a story.
+
+**OCR (`src/ingestion/parsers.py`).** A PDF whose text layer is below `min_chars_per_page` used to be
+refused outright; it now goes through docling with OCR enabled, and `ScannedDocument` is raised only
+when OCR is switched off (`OCR_ENABLED=0`), the document is over `OCR_MAX_PAGES`, or OCR comes back
+with nothing. The engine is RapidOCR on ONNX Runtime: ~30 MB of weights, no system package (so no
+tesseract binary in the image) and no GPU, baked into the image alongside bge, mxbai and the docling
+artifacts, so a scanned upload does not reach the network on its first request. The page cap is
+deliberately far below `max_pages` -- OCR measures ~9s per page on this CPU, so 50 pages already
+spends most of the ingest job's 900s timeout, and a document that cannot finish inside the timeout
+should be refused at validation with a reason rather than time out in the worker.
+
+Whether OCR is worth having is a retrieval question, not a parsing one, so `evaluation/ocr_parity.py`
+measures it with the gate's own metrics: it rasterises a sample PDF (the copy has no text layer at
+all, so every character in the comparison came out of OCR), ingests both copies into tenants of their
+own so they can share a filename, and re-asks the golden-set items that only that document answers.
+`leave_policy.pdf`, 13 pages, 7 items, `hybrid_rerank`:
+
+| Metric | Text layer | OCR |
+|---|---|---|
+| hit@k | 1.000 | 1.000 |
+| MRR | 1.000 | 1.000 |
+| context recall | 1.000 | 1.000 |
+| context precision | 0.714 | 0.607 |
+| answered rate | 1.000 | 1.000 |
+
+Ranking is identical, every item is still answered rather than refused, and the one loss is context
+precision: OCR produced 92 chunks where the text layer produced 78, so more passages compete for the
+same four context slots. OCR ingest of the 13 pages took 123s against 24s for the text layer. This
+runs nightly from `eval-nightly.yml` rather than in the PR gate -- it needs the OCR artifacts and
+rasterises a document, and what it measures is a capability rather than a floor -- so an OCR
+regression surfaces as a number the next morning instead of the next time someone uploads a scan.
+
+**Table structure in the assembled context (`_table_window` in `src/generation/answerer.py`).** A
+table parent was windowed the way prose is, by characters around the matched span. On a long table
+that cuts rows in half and drops the header row entirely, and the model then reads `| GS-09 | 4 |`
+with nothing left saying which column is which. Table parents are now windowed by whole rows, with
+the markdown header always kept and rows grown outward from the matched span; the character fallback
+stays for the one case rows cannot cover -- a single linearised row longer than the whole budget,
+where the token budget has to win. The retrieval gate is unchanged by it, and that is the honest way
+to report it: the gate scores a source by filename and page, so windowing is invisible to it by
+construction. The unit tests assert the structural property -- header kept, no half row, the matched
+span still pointing at its own row -- and the gate asserts that nothing regressed.
+
+Shipped code, `retrieval` profile, 33 items, `hybrid_rerank`: hit@k 1.000, MRR 1.000, context recall
+0.960, context precision 0.680, refusal recall 1.000, false refusal rate 0.000 -- PASS, identical to
+the step 8 baseline on every metric. One earlier run of this gate came back FAIL (hit@k 0.880, three
+`company_policy` items abstaining at 0.02-0.21), and the cause was the measurement rather than the
+code: the test suite was running against the same Postgres, and `conftest._reset()` deletes every
+tenant including the evaluation corpus -- exactly what that fixture's own comment warns about.
+Recorded because it is the failure mode of one shared stack serving both tests and evals, and the
+next person staring at an inexplicable gate failure should check for a concurrent `pytest` first.
+
+**Dropped: skipping the cross-encoder when fusion already looks decided.** The idea was a cascade --
+reranking is p50 13s on this CPU and sub-query splitting multiplies its pairs, so a query whose top
+hit both retrievers agree on could skip it. Implemented, it fired on 0 of 33 golden-set queries; the
+next step was therefore to measure whether the signal exists at all, rather than to tune thresholds
+until it fired. Per query, pre-rerank: fused top score, its margin over the runner-up, both ranks,
+and whether the cross-encoder then changed anything.
+
+- RRF compresses the top of the list, so there is no margin to threshold on: the largest fused
+  margin across 33 queries is **0.056**. No reachable margin rule separates anything.
+- The fused score does not know answerable from unanswerable. Answerable items span 0.961-1.000 and
+  unanswerable ones **0.924-0.977** -- fully overlapping. Only the cross-encoder separates them:
+  0.583-0.993 against 0.010-0.168. A cascade keyed on fusion would skip exactly the pass the abstain
+  gate depends on, and refusal recall (1.000 over eight items) would be what paid for the latency.
+- The cross-encoder is not redundant either: it changed the top-1 hit on 20 of 33 queries, reordered
+  the top 4 on 32 of 33, and fixed a wrong fusion top-1 on 3 of the 25 answerable items.
+
+The code was removed and the measurement kept. The same numbers close item 24's open question -- the
+abstain threshold had not been re-checked since decomposition changed the score distribution it was
+swept against -- and 0.3 sits in the middle of the 0.168-0.583 gap, so the swept value still holds.
+Latency work on reranking belongs where item 15 put it: batching on TEI, or a quantized model, not a
+heuristic that skips the one stage carrying the safety property.
+
+**Not done, and for two different reasons.** `bge-m3` / Voyage embeddings, Matryoshka + int8,
+ColBERT/SPLADE late interaction, a `bge-reranker-v2-m3` / Cohere Rerank benchmark, LLM-generated
+contextual chunk prefixes, RAPTOR summaries, agentic retrieve-critique-re-retrieve, table-QA or
+text-to-SQL routing, and GraphRAG. The model swaps are gated on an evaluation set that can resolve
+them: ranking on this golden set is already hit@k 1.000 / MRR 1.000, so a better model and a worse
+one would score identically, and the honest next step is a larger set with harder negatives rather
+than a model download. The architectural items are each larger than this step, and several give up
+the provider-free property that lets the PR gate see them at all -- worth doing, one at a time, each
+with its own number.
 
 ### 20. API design
 No `/v1` prefix, no pagination on `/documents`, no RFC 9457 `problem+json` errors, no idempotency
@@ -674,12 +761,19 @@ streams, 12-factor compliance throughout.
 7. ~~**Eval gating in CI** — so quality cannot silently regress~~ **done**
 8. ~~**TEI inference service**, then retrieval-quality work against gated evals~~ **done**
    (items 15 and 24)
-9. **The rest of the retrieval roadmap** (item 19), measured the same way
+9. ~~**The rest of the retrieval roadmap** (item 19), measured the same way~~ **partly done** --
+   OCR with a parity harness, table rows preserved into the prompt, and a cascade experiment
+   measured and dropped. The model-swap and architectural items are still open, and what binds them
+   now is the golden set, not the code.
 
 Steps 1-7 turn this from a prototype into a service a team can see into and measure. Step 8 was
 the first change made *through* that apparatus rather than alongside it, and it went the way the
 argument for building it said it would: the gate named a defect (item 17), the fix moved the false
 refusal rate from 0.160 to 0.000 and MRR from 0.948 to 1.000 (item 24), the thresholds ratcheted so
 it cannot come back, and the inference split (item 15) is what keeps the extra cross-encoder pairs
-affordable. Item 19 is the same loop repeated -- OCR, contextual retrieval, a stronger reranker,
-table routing -- with a number attached to each attempt instead of an opinion.
+affordable. Step 9 was the same loop repeated, and it ran to both of its endings: OCR is in, with measured parity
+to a native text layer; table rows survive into the prompt; and a cascade that would have cut the
+expensive stage was measured, found to rest on a signal that does not exist, and deleted. What the
+step really surfaced is where the apparatus now binds -- with hit@k and MRR both at 1.000, a 33-item
+golden set can no longer tell a better retriever from a worse one, so the next honest move in item 19
+is a harder evaluation set, not another model.

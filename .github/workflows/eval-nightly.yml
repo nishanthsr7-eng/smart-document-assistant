@@ -89,8 +89,18 @@ jobs:
       - name: Eval gate
         run: python -m evaluation.run_eval --gate ${{ inputs.profile || 'generation' }}
 
+      # Not a gate: it needs OCR artifacts and rasterises a document, and its subject is a
+      # capability rather than a floor. It runs nightly so an OCR regression shows up as a
+      # number the next morning instead of the next time someone uploads a scan.
+      - name: OCR parity
+        run: |
+          docling-tools models download rapidocr --rapidocr-backend-lang onnxruntime:ch -o data/models
+          python -m evaluation.ocr_parity
+
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: eval-gate-nightly
-          path: evaluation/results/gate_*.*
+          path: |
+            evaluation/results/gate_*.*
+            evaluation/results/ocr_parity.*

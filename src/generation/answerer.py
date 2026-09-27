@@ -14,6 +14,7 @@ from src.core.tokens import count_tokens
 from src.core.tracing import OnStage, Trace
 from src.generation.client import Provider
 from src.generation.prompts import (
+    CITE_PATTERN,
     DIDYOUMEAN_SYSTEM,
     FOLLOWUP_SYSTEM,
     NO_ANSWER,
@@ -36,8 +37,8 @@ from src.trust.confidence import ConfidenceResult
 
 OnToken = Callable[[str], None]
 
-_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\[])")
-_CITE_STRIP_RE = re.compile(r"\s*\[\d+\]")
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\[【［])")
+_CITE_STRIP_RE = re.compile(r"\s*" + CITE_PATTERN)
 
 def _cache_key(
     tenant_id: str, question: str, doc_ids: list[str], mode: str, generate: bool
@@ -524,11 +525,21 @@ def _assemble_sources(
             continue
         remaining = budget - used_tokens
         if len(sources) < context_k and remaining > 0:
-            text, span = _center_on_span(parent.text, best_hit[parent_id].char_span_in_parent, pad)
-            tokens = count_tokens(text)
-            if tokens > remaining:
-                text, span = _truncate_around_span(text, span, remaining)
+            span_in_parent = best_hit[parent_id].char_span_in_parent
+            if parent.kind == "table":
+                # Same envelope _center_on_span works to: the matched span plus padding either
+                # side, capped by what is left of the context budget.
+                matched_tokens = count_tokens(parent.text[span_in_parent[0]:span_in_parent[1]])
+                text, span = _table_window(
+                    parent.text, span_in_parent, min(remaining, 2 * pad + matched_tokens)
+                )
                 tokens = count_tokens(text)
+            else:
+                text, span = _center_on_span(parent.text, span_in_parent, pad)
+                tokens = count_tokens(text)
+                if tokens > remaining:
+                    text, span = _truncate_around_span(text, span, remaining)
+                    tokens = count_tokens(text)
             used_tokens += tokens
             sources.append(_source(len(sources) + 1, parent, span, text, best_hit[parent_id].score))
             context_chunk_ids.append(best_hit[parent_id].chunk_id)
@@ -537,6 +548,58 @@ def _assemble_sources(
         else:
             break
     return sources, unused, context_chunk_ids
+
+
+_MD_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+
+
+def _table_window(text: str, span: tuple[int, int], budget_tokens: int) -> tuple[str, tuple[int, int]]:
+    """Window a table parent by whole rows, always keeping the markdown header.
+
+    A character window cuts rows in half and, on a long table, drops the header row entirely --
+    the model then reads a number with nothing saying which column it came from. Rows grow
+    outward from the matched span, forward first, so the row a hit landed on keeps its
+    neighbours and its column names.
+    """
+    if count_tokens(text) <= budget_tokens:
+        return text, span
+
+    lines = text.splitlines(keepends=True)
+    offsets: list[tuple[int, int]] = []
+    pos = 0
+    for line in lines:
+        offsets.append((pos, pos + len(line)))
+        pos += len(line)
+
+    header = {i for i in range(min(2, len(lines))) if _MD_ROW_RE.match(lines[i])}
+    matched = [i for i, (start, end) in enumerate(offsets) if start < span[1] and end > span[0]]
+    if not matched:
+        matched = [len(header)] if len(header) < len(lines) else [0]
+
+    keep = header | set(matched)
+    tokens = sum(count_tokens(lines[i]) for i in keep)
+    # Forward, then backward, and each direction stops at the first row that does not fit: a
+    # window that skipped a long row and glued a later one on would read as adjacent rows.
+    for direction in (range(max(matched) + 1, len(lines)), range(min(matched) - 1, -1, -1)):
+        for candidate in direction:
+            if candidate in keep:
+                continue
+            cost = count_tokens(lines[candidate])
+            if tokens + cost > budget_tokens:
+                break
+            keep.add(candidate)
+            tokens += cost
+
+    kept = sorted(keep)
+    windowed = "".join(lines[i] for i in kept)
+    before = sum(len(lines[i]) for i in kept if i < min(matched))
+    length = sum(len(lines[i]) for i in matched)
+    span_in_window = (before, before + length)
+    if count_tokens(windowed) > budget_tokens:
+        # One row longer than the whole budget: a linearised table cell can be. The budget is
+        # the hard constraint, so fall back to cutting inside the row.
+        return _truncate_around_span(windowed, span_in_window, budget_tokens)
+    return windowed, span_in_window
 
 
 def _mmr_order(

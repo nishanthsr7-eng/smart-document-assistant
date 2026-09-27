@@ -158,6 +158,11 @@ class IngestionConfig:
     max_upload_mb: int = 20
     max_pages: int = 200
     min_chars_per_page: int = 40
+    # A PDF whose text layer is below min_chars_per_page is scanned: it goes through OCR
+    # instead of being rejected. OCR measures ~9s per page on this CPU, so the page cap is far
+    # below max_pages -- a 50-page scan already spends most of the job's 15-minute timeout.
+    ocr_enabled: bool = os.environ.get("OCR_ENABLED", "1") != "0"
+    ocr_max_pages: int = int(os.environ.get("OCR_MAX_PAGES", "50"))
 
 
 @dataclass(frozen=True)

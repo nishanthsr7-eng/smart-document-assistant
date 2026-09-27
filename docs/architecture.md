@@ -343,9 +343,11 @@ trips. Target: **first token < 1.2 s, complete verified answer < 4 s** on the ho
 
 1. **Format coverage**: DOCX, PPTX, XLSX/CSV, MD, HTML, EML/MSG. Docling already covers most;
    the work is element mapping and per-format section inference. An org corpus is not PDFs.
-2. **OCR path** for scanned pages (currently a hard reject via `ScannedDocument`): per-page
-   fallback to Tesseract/RapidOCR when a page's char density is below threshold, with the page
-   flagged `ocr=true` so confidence can discount it.
+2. **Per-page OCR.** Whole-document OCR is in (RapidOCR via docling, `OCR_ENABLED`/`OCR_MAX_PAGES`,
+   parity measured in `evaluation/results/ocr_parity.md`), but the decision is made once for the
+   document from its average char density. The remaining work is per-page: a mixed PDF -- text pages
+   plus scanned forms -- is above the floor overall, so its scanned pages are still lost, and a page
+   read by OCR is not flagged `ocr=true` for confidence to discount.
 3. **Parallel + resumable ingest**: process files concurrently, checkpoint per document, and
    make the persist→embed→index sequence transactional (B12e).
 4. **Document versioning**: keep supersession rather than replace-by-filename, so the corpus can

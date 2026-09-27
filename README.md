@@ -63,7 +63,7 @@ User
 
 **Data flow:**
 
-1. **Ingest**: Upload -> parse (docling for complex PDFs, pypdf for simple ones) -> structure-aware chunking (parent/child, 800/200 tokens) -> embed with `bge-base-en-v1.5` -> chunks and vectors to Postgres/pgvector, raw file and parent blobs to S3/MinIO
+1. **Ingest**: Upload -> parse (docling for complex PDFs, pypdf for simple ones, OCR when there is no text layer) -> structure-aware chunking (parent/child, 800/200 tokens) -> embed with `bge-base-en-v1.5` -> chunks and vectors to Postgres/pgvector, raw file and parent blobs to S3/MinIO
 2. **Retrieve**: Question -> embed -> hybrid search (dense cosine via pgvector + lexical via Postgres `tsvector`, reciprocal rank fusion) -> optional cross-encoder reranking (default mode) -> top-k context assembly with token budget
 3. **Generate**: Abstention gate (is there enough evidence?) -> prompt with source blocks (injection-hardened) -> LLM answers in plain text with inline `[n]` citation markers -> citation validation -> confidence scoring
 4. **Present**: Answer with inline citations, source cards with highlighted passages, trace viewer showing each stage's timing and data
@@ -113,6 +113,7 @@ data/sample_docs/        Three real public-domain U.S. government documents
 | **Health probes** | `/livez` static; `/health` pings backends only, memoized 10s | Safe for a k8s probe: no embedding pass, no provider call, no collection scan. |
 | **Cache and locks** | Redis | Answer cache and parent-payload cache are shared, so invalidation on ingest reaches every worker; the ingest lock serializes replace-by-filename across processes. |
 | **PDF parsing** | docling + pypdf | docling handles complex layouts (tables, figures, sections); pypdf is a fast path for simple text PDFs, saving 3-10s per file. |
+| **OCR** | RapidOCR (ONNX Runtime) via docling | Only reached when a PDF's text layer is below the per-page floor. ONNX means ~30 MB of weights, no system package (no tesseract binary) and no GPU, and the artifacts are baked into the image with the rest. Retrieval parity against a rasterised copy of a sample document is measured in `evaluation/results/ocr_parity.md`. |
 | **Figure captioning** | BLIP (`blip-image-captioning-base`) | `parsers.FigureCaptioner` runs behind the same lazy-singleton pattern as the embedder; the `/ingest` route constructs one and every extracted figure gets indexed as `[Figure, p.N: <caption>]` instead of a bare placeholder. |
 | **UI** | React + Vite | Fast, modern SPA with custom CSS modules. Replaces the older Streamlit prototype. |
 | **Chunking** | Parent/child (800/200 tokens) | Children are sized to the embedder's token window; parents provide full context to the LLM. Structure-aware splitting preserves section boundaries. |
@@ -424,7 +425,8 @@ When a question can't be answered from the corpus, the system finds the closest-
 
 | Case | Behavior | Where |
 | --- | --- | --- |
-| Encrypted / scanned / zero-text PDF | Reason-specific error message, upload rejected | `src/ingestion/parsers.py` |
+| Scanned PDF (no text layer) | Read by OCR (RapidOCR via docling) instead of rejected; refused with a reason only when OCR is disabled, over the OCR page cap, or finds no text | `src/ingestion/parsers.py` |
+| Encrypted / zero-text PDF | Reason-specific error message, upload rejected | `src/ingestion/parsers.py` |
 | Wrong extension / spoofed type / 0-byte / oversize / page cap / non-UTF-8 TXT | Rejected with a specific message; TXT falls back to cp1252 before giving up | `src/ingestion/parsers.py` |
 | Question before upload | Send disabled, hint explains why | `frontend/src/components/Composer.jsx` |
 | Empty / over-length question | Send disabled past 2000 chars, hint shown | `frontend/src/components/Composer.jsx` |
@@ -541,9 +543,9 @@ Specific uses:
 
 1. **Reranker latency**: The cross-encoder reranker adds meaningful latency, especially on CPU-only hardware, and a question that splits into parts multiplies the pairs it scores (p50 13.2s unchanged, p95 42.4s on this machine's CPU). Moving it onto TEI (see **Inference service**) is the mitigation; an int8/ONNX-quantized deployment has not been benchmarked here.
 2. **PDF-only complex parsing**: Only PDF and TXT are supported. DOCX/XLSX could be added via docling but were out of scope.
-3. **No OCR**: Fully scanned PDFs are rejected. Mixed PDFs (text pages + scanned forms) index the text pages only and caption figures via BLIP, but scanned text itself isn't recovered.
+3. **OCR is all-or-nothing per document**: A PDF whose text layer is below the per-page floor goes through OCR (RapidOCR, ONNX, weights baked into the image), capped at `OCR_MAX_PAGES=50` because OCR measures ~9s per page on a CPU (13 pages in 123s). A *mixed* PDF -- text pages plus scanned forms -- is above the floor overall, so it still indexes the text pages only and its scanned pages are not recovered. Measured quality against a rasterised copy of a sample document is in `evaluation/results/ocr_parity.md`.
 4. **Single-session memory**: Follow-up questions are resolved against the last few turns via a condense-and-expand prompt, but history lives only in the browser tab and is lost on refresh — nothing is persisted server-side.
-5. **Abstention calibration**: The abstention threshold (0.3) was swept on a 33-item golden set, before query decomposition changed the score distribution it was swept against; it has not been re-swept. A larger, more diverse evaluation set would produce more robust thresholds.
+5. **Abstention calibration**: The abstention threshold (0.3) was swept on a 33-item golden set. It was re-checked against the post-decomposition score distribution: across the 33 items the lowest answerable rerank score is 0.583 and the highest unanswerable one is 0.168, so 0.3 sits in the middle of that gap and the sweep's answer still holds. The gap itself is a 33-item measurement; a larger, more diverse set would produce a more robust threshold, and `Reranker.calibrate` is still the identity (a=1, b=0 -- unfitted).
 6. **Rule-based query decomposition**: Sub-queries come from punctuation and a question-opening word list, not from a model. Questions those rules do not cover keep the old single-pair behaviour.
 
 ## Time Log
