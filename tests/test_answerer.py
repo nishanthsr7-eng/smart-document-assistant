@@ -1,6 +1,7 @@
 import pytest
 
 from src.core.config import SETTINGS
+from src.core.errors import QueryCancelled
 from src.core.tokens import count_tokens
 from src.generation import answerer
 from src.ingestion.chunker import ParentChunk
@@ -144,3 +145,53 @@ def test_table_source_is_row_aligned_end_to_end(stub_parents):
     )
     assert sources[0].text.startswith("| Grade | Hours per pay period |")
     assert row in sources[0].text
+
+
+# --- answer cache key ---
+
+
+def _key(question: str, history=None, mode: str = "hybrid", generate: bool = True) -> str:
+    return answerer._cache_key(TENANT, question, ["d1"], mode, generate, history)
+
+
+def test_cache_key_separates_two_conversations():
+    """The same words mean a different question in a different conversation, so they must not
+    share a cached answer."""
+    first = [("user", "Tell me about the 2024 bonus pool."), ("assistant", "It was 4.2M.")]
+    second = [("user", "Tell me about the 2025 bonus pool."), ("assistant", "It was 5.1M.")]
+    assert _key("What is the revenue?", first) != _key("What is the revenue?", second)
+
+
+def test_cache_key_is_stable_for_the_same_conversation():
+    history = [("user", "What is the bonus pool?"), ("assistant", "4.2M.")]
+    assert _key("And the revenue?", history) == _key("And the revenue?", list(history))
+
+
+def test_cache_key_ignores_turns_outside_the_condense_window():
+    """Only the last history_turns turns reach the condenser, so only those may change the key --
+    otherwise every follow-up in a long conversation misses."""
+    window = SETTINGS.generation.history_turns
+    recent = [(f"user{i}", f"turn {i}") for i in range(window)]
+    assert _key("And then?", [("user", "ancient")] + recent) == _key("And then?", recent)
+
+
+def test_cache_key_without_history_is_not_the_empty_history_key():
+    history = [("user", "What is the bonus pool?")]
+    assert _key("What is the revenue?", None) == _key("What is the revenue?", [])
+    assert _key("What is the revenue?", None) != _key("What is the revenue?", history)
+
+
+# --- cancellation ---
+
+
+def test_halt_raises_once_the_flag_is_set():
+    cancelled = False
+    answerer._halt(lambda: cancelled, "searching")
+    cancelled = True
+    with pytest.raises(QueryCancelled) as exc:
+        answerer._halt(lambda: cancelled, "generating")
+    assert exc.value.reason == "generating"
+
+
+def test_halt_without_a_cancel_callback_is_a_no_op():
+    answerer._halt(None, "searching")

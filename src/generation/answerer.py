@@ -5,10 +5,10 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from src.auth.principal import Principal
-from src.core import metrics
+from src.core import limits, metrics
 from src.core.cache import ANSWER_CACHE
 from src.core.config import SETTINGS
-from src.core.errors import GenerationError, ModelUnavailable
+from src.core.errors import GenerationError, ModelUnavailable, QueryCancelled
 from src.core.otel import TracedPool
 from src.core.tokens import count_tokens
 from src.core.tracing import OnStage, Trace
@@ -18,11 +18,11 @@ from src.generation.prompts import (
     DIDYOUMEAN_SYSTEM,
     FOLLOWUP_SYSTEM,
     NO_ANSWER,
-    SYSTEM,
     build_didyoumean_prompt,
     build_followup_prompt,
     build_user_prompt,
     parse_citations,
+    system_prompt,
 )
 from src.ingestion.chunker import ParentChunk
 from src.ingestion.pipeline import load_parents
@@ -32,16 +32,30 @@ from src.retrieval.hybrid import FusedHit, fuse, merge_dense
 from src.retrieval.keyword_index import KeywordIndex
 from src.retrieval.reranker import Reranker
 from src.retrieval.vector_store import Hit, VectorStore
-from src.trust import abstention, citations, confidence
+from src.trust import abstention, citations, confidence, scanner
 from src.trust.confidence import ConfidenceResult
 
 OnToken = Callable[[str], None]
+Cancel = Callable[[], bool]
+
+
+def _halt(cancel: Optional["Cancel"], stage: str) -> None:
+    """Checked between stages and per token: a cancelled query stops at the next boundary
+    rather than running to completion for a caller that has gone."""
+    if cancel is not None and cancel():
+        raise QueryCancelled(stage)
+
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\[【［])")
 _CITE_STRIP_RE = re.compile(r"\s*" + CITE_PATTERN)
 
 def _cache_key(
-    tenant_id: str, question: str, doc_ids: list[str], mode: str, generate: bool
+    tenant_id: str,
+    question: str,
+    doc_ids: list[str],
+    mode: str,
+    generate: bool,
+    history: Optional[list[tuple[str, str]]],
 ) -> str:
     # tenant_id is part of the key: without it two tenants asking the same question of
     # same-named documents would share one cached answer. retrieval_version is part of it so a
@@ -55,9 +69,24 @@ def _cache_key(
             mode,
             str(generate),
             SETTINGS.retrieval_version,
+            _history_key(history),
         ]
     )
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _history_key(history: Optional[list[tuple[str, str]]]) -> str:
+    """The conversation turns that actually reach the condenser, and nothing else.
+
+    "What is the revenue?" means a different question in two conversations, so an answer cached
+    under the raw question alone is the wrong answer for the second one. The window is the same
+    slice `query.condense` takes: an older turn cannot change the answer, so it must not change
+    the key either, or every follow-up would miss.
+    """
+    if not history:
+        return ""
+    recent = history[-SETTINGS.generation.history_turns :]
+    return "\x1e".join(f"{role}\x1d{text.strip()}" for role, text in recent)
 
 
 def _finish(key: Optional[str], answer: "Answer") -> "Answer":
@@ -148,12 +177,13 @@ def answer_question(
     on_token: Optional[OnToken] = None,
     history: Optional[list[tuple[str, str]]] = None,
     generate: bool = True,
+    cancel: Optional[Cancel] = None,
 ) -> Answer:
     trace = Trace(tenant_id=principal.tenant_id, user_id=principal.user_id)
     with trace.root(question, mode, doc_ids, generate):
         return _answer(
             trace, question, doc_ids, embedder, store, client, keyword_index, reranker,
-            principal, mode, on_stage, on_token, history, generate,
+            principal, mode, on_stage, on_token, history, generate, cancel,
         )
 
 
@@ -172,22 +202,22 @@ def _answer(
     on_token: Optional[OnToken],
     history: Optional[list[tuple[str, str]]],
     generate: bool,
+    cancel: Optional[Cancel],
 ) -> Answer:
     tenant_id = principal.tenant_id
 
-    cache_key: Optional[str] = None
-    if not history:
-        cache_key = _cache_key(tenant_id, question, doc_ids, mode, generate)
-        cached: Optional[Answer] = ANSWER_CACHE.get(cache_key)
-        if cached is not None:
-            if on_token is not None and cached.answer_text:
-                on_token(cached.answer_text)
-            _observe(cached, trace, cached=True)
-            return cached
+    cache_key = _cache_key(tenant_id, question, doc_ids, mode, generate, history)
+    cached: Optional[Answer] = ANSWER_CACHE.get(cache_key)
+    if cached is not None:
+        if on_token is not None and cached.answer_text:
+            on_token(cached.answer_text)
+        _observe(cached, trace, cached=True)
+        return cached
 
     # An imperative aimed at the assistant is not part of the information need. Dropping it
     # here keeps it out of the embedding, the cross-encoder pair and the prompt, so an injected
     # question is resisted rather than merely refused.
+    _halt(cancel, "searching")
     asked = query.sanitize(question)
     search_query = asked
     retrieval_consensus = False
@@ -272,6 +302,7 @@ def _answer(
     calibrated_top: float = 0.0
     calibrated_margin: float = 1.0
     if mode == "hybrid_rerank":
+        _halt(cancel, "reranking")
         with trace.stage("Reranking", on_stage) as payload:
             rerank_queries = query.subqueries(search_query)
             scored_hits = reranker.rerank(rerank_queries, hits)
@@ -305,6 +336,7 @@ def _answer(
             ),
         )
 
+    _halt(cancel, "assembling")
     with trace.stage("Assembling context", on_stage) as payload:
         sources, unused, context_chunk_ids = _assemble_sources(hits, store, tenant_id)
         payload["sources"] = len(sources)
@@ -335,22 +367,40 @@ def _answer(
             validation_futures.append((new, validation_pool.submit(citations.validate_batch, new, source_texts, reranker)))
         validated_prefix = complete
 
-    with TracedPool(max_workers=1) as pool:
-        followup_future = pool.submit(_suggested_followups, client, search_query, unused or sources)
-        text = _generate_text(
-            client,
-            build_user_prompt(asked, prompt_sources),
-            trace,
-            on_stage,
-            on_token,
-            on_partial=_submit_completed_sentences if on_token is not None else None,
-        )
-        llm_suggestions = followup_future.result()
+    try:
+        with TracedPool(max_workers=1) as pool:
+            followup_future = pool.submit(
+                _suggested_followups, client, search_query, unused or sources
+            )
+            text = _generate_text(
+                client,
+                build_user_prompt(asked, prompt_sources),
+                trace,
+                on_stage,
+                on_token,
+                on_partial=_submit_completed_sentences if on_token is not None else None,
+                cancel=cancel,
+            )
+            llm_suggestions = followup_future.result()
+    except QueryCancelled:
+        # The validation pool is not scoped to a `with`, because the two normal exits shut it
+        # down with different wait flags. A cancel is a third exit and has to say so too.
+        validation_pool.shutdown(wait=False, cancel_futures=True)
+        raise
 
     if not text or text.strip().upper().startswith(NO_ANSWER):
         reason = "The answer isn't supported by the selected documents."
         validation_pool.shutdown(wait=False, cancel_futures=True)
         return _finish(cache_key, Answer("abstained", [], sources, trace, hits, abstain_reason=reason))
+
+    verdict = scanner.scan(text, "\n".join(source_texts.values()))
+    if not verdict.ok:
+        metrics.OUTPUT_SCAN_BLOCKS.labels(reason=verdict.reason.split("(")[0].strip()).inc()
+        validation_pool.shutdown(wait=False, cancel_futures=True)
+        return _finish(
+            cache_key,
+            Answer("abstained", [], sources, trace, hits, abstain_reason=scanner.refusal(verdict)),
+        )
 
     sentences = _dedup_sentences(_parse_sentences(text))
 
@@ -413,18 +463,21 @@ def _generate_text(
     on_stage: Optional[OnStage],
     on_token: Optional[OnToken],
     on_partial: Optional[Callable[[str], None]] = None,
+    cancel: Optional[Cancel] = None,
 ) -> str:
     with trace.stage("Generating", on_stage) as payload:
         payload["prompt"] = prompt
-        payload["model"] = client.model
         if on_token is None:
-            completion = client.generate(SYSTEM, prompt)
+            completion = client.generate(system_prompt(), prompt)
             text = completion.text
             payload["prompt_tokens"] = completion.prompt_tokens
             payload["completion_tokens"] = completion.completion_tokens
         else:
             parts: list[str] = []
-            for chunk in client.stream(SYSTEM, prompt):
+            for chunk in client.stream(system_prompt(), prompt):
+                # Per token, not per stage: this is the loop that spends money, and closing the
+                # provider generator here is what stops the spend.
+                _halt(cancel, "generating")
                 parts.append(chunk)
                 accumulated = "".join(parts)
                 on_token(accumulated)
@@ -433,8 +486,16 @@ def _generate_text(
             text = "".join(parts)
             payload["prompt_tokens"], payload["completion_tokens"] = client.last_usage
         payload["completion"] = text
+        # After the call, not before: with a failover chain the provider that served this answer
+        # is only known once one of them has.
+        payload["model"] = client.model
         payload["cost_usd"] = metrics.token_cost(
             client.model, payload["prompt_tokens"], payload["completion_tokens"]
+        )
+        limits.record_spend(
+            trace.tenant_id,
+            payload["prompt_tokens"] + payload["completion_tokens"],
+            payload["cost_usd"],
         )
     return text.strip()
 

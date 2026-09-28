@@ -1,13 +1,16 @@
 import random
+import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Protocol, TypeVar
+from typing import Any, Callable, Iterator, Optional, Protocol, TypeVar
 
 import httpx
 
-from src.core import metrics
+from src.core import logs, metrics
 from src.core.config import SETTINGS
 from src.core.errors import GenerationError, ModelUnavailable
+
+logger = logs.logger(__name__)
 
 _T = TypeVar("_T")
 _TRANSIENT_STATUS = {429, 500, 502, 503, 504}
@@ -293,13 +296,148 @@ _PROVIDERS: dict[str, Callable[[], Provider]] = {
 }
 
 
-def build_client() -> Provider:
-    name = SETTINGS.models.llm_provider
-    if name not in _PROVIDERS:
+class _Breaker:
+    """One provider's failure state. Closed, or open until a cooldown elapses and one probe is
+    let through: a provider that is down should cost one request per cooldown, not every request.
+    """
+
+    def __init__(self, provider: str) -> None:
+        self._provider = provider
+        self._lock = threading.Lock()
+        self._failures = 0
+        self._opened_at = 0.0
+        metrics.LLM_BREAKER_OPEN.labels(provider).set(0)
+
+    def allows(self) -> bool:
+        cfg = SETTINGS.models
+        with self._lock:
+            if self._failures < cfg.llm_breaker_failures:
+                return True
+            # Open. The probe resets the clock, so concurrent callers do not all probe at once.
+            if time.monotonic() - self._opened_at < cfg.llm_breaker_cooldown_s:
+                return False
+            self._opened_at = time.monotonic()
+            return True
+
+    def succeeded(self) -> None:
+        with self._lock:
+            self._failures = 0
+        metrics.LLM_BREAKER_OPEN.labels(self._provider).set(0)
+
+    def failed(self) -> None:
+        with self._lock:
+            self._failures += 1
+            opened = self._failures >= SETTINGS.models.llm_breaker_failures
+            if opened:
+                self._opened_at = time.monotonic()
+        if opened:
+            metrics.LLM_BREAKER_OPEN.labels(self._provider).set(1)
+
+
+class FailoverProvider:
+    """An ordered chain of providers behind one Provider interface.
+
+    A generation is attempted against each member whose breaker allows it, in order, until one
+    answers. Construction counts as an attempt: a missing API key trips that member's breaker
+    rather than failing the process, which is what makes the chain survive a key being rotated
+    out from under a running deployment.
+
+    `stream` fails over only before the first chunk reaches the caller. Once tokens are out, a
+    second provider would restate the answer from the top, so a mid-stream failure propagates.
+    """
+
+    def __init__(self, names: list[str]) -> None:
+        self._names = names
+        self._built: dict[str, Provider] = {}
+        self._breakers = {name: _Breaker(name) for name in names}
+        self.name = names[0]
+        self.model = ""
+        self.last_usage = (0, 0)
+
+    def generate(self, system: str, user: str) -> Completion:
+        def call(provider: Provider) -> Completion:
+            completion = provider.generate(system, user)
+            self.last_usage = provider.last_usage
+            return completion
+
+        return self._attempt("generate", call)
+
+    def stream(self, system: str, user: str) -> Iterator[str]:
+        def call(provider: Provider) -> Iterator[str]:
+            chunks = provider.stream(system, user)
+            first = next(chunks, None)
+            return _resume(provider, chunks, first, self)
+
+        return self._attempt("stream", call)
+
+    def health(self) -> None:
+        last: Optional[Exception] = None
+        for name in self._names:
+            try:
+                self._provider(name).health()
+                return
+            except (ModelUnavailable, GenerationError) as exc:
+                last = exc
         raise ModelUnavailable(
-            f"Unknown LLM_PROVIDER '{name}'. Choose one of: {', '.join(_PROVIDERS)}."
+            f"No provider in the chain ({', '.join(self._names)}) is usable: {last}"
         )
-    return _PROVIDERS[name]()
+
+    def _attempt(self, op: str, call: Callable[[Provider], _T]) -> _T:
+        failures: list[str] = []
+        previous = ""
+        for name in self._names:
+            breaker = self._breakers[name]
+            if not breaker.allows():
+                failures.append(f"{name}: breaker open")
+                continue
+            if previous:
+                metrics.LLM_FAILOVER.labels(previous, name).inc()
+            previous = name
+            try:
+                provider = self._provider(name)
+                result = call(provider)
+            except (ModelUnavailable, GenerationError) as exc:
+                breaker.failed()
+                failures.append(f"{name}: {exc}")
+                logger.warning("Provider failed", extra={"provider": name, "op": op, "error": str(exc)})
+                continue
+            breaker.succeeded()
+            self.name = name
+            self.model = provider.model
+            return result
+        raise ModelUnavailable("Every generation provider failed. " + "; ".join(failures))
+
+    def _provider(self, name: str) -> Provider:
+        if name not in self._built:
+            self._built[name] = _PROVIDERS[name]()
+        return self._built[name]
+
+
+def _resume(
+    provider: Provider, chunks: Iterator[str], first: Optional[str], parent: FailoverProvider
+) -> Iterator[str]:
+    if first is not None:
+        yield first
+        yield from chunks
+    parent.last_usage = provider.last_usage
+
+
+def build_client() -> Provider:
+    names = chain()
+    unknown = [name for name in names if name not in _PROVIDERS]
+    if unknown:
+        raise ModelUnavailable(
+            f"Unknown generation provider {', '.join(unknown)}. Choose from: {', '.join(_PROVIDERS)}."
+        )
+    if len(names) == 1:
+        return _PROVIDERS[names[0]]()
+    return FailoverProvider(names)
+
+
+def chain() -> list[str]:
+    """LLM_PROVIDER first, then LLM_FALLBACK_CHAIN, duplicates dropped."""
+    names = [SETTINGS.models.llm_provider, *SETTINGS.models.llm_fallback_chain]
+    return list(dict.fromkeys(names))
 
 
 def _messages(system: str, user: str) -> list[Any]:
