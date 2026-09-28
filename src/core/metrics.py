@@ -60,6 +60,12 @@ CITATION_CHECKS = Counter(
     "Cited sentences by verifier verdict. Citation validity is supported / (supported+unsupported).",
     ["status"],
 )
+OUTPUT_SCAN_BLOCKS = Counter(
+    "sda_output_scan_blocks_total",
+    "Answers withheld by the output scanner, by what it found. A nonzero rate here is a document "
+    "steering the model, not a model quirk: page the owner of whatever was uploaded that day.",
+    ["reason"],
+)
 RETRIEVAL_TOP_SCORE = Histogram(
     "sda_retrieval_top_score",
     "Top fused retrieval score per query, the input to the abstain gate.",
@@ -71,7 +77,64 @@ LLM_TOKENS = Counter(
 LLM_COST = Counter(
     "sda_llm_cost_usd_total", "Generation spend, priced from config.", ["provider", "model"]
 )
+RATE_LIMITED = Counter(
+    "sda_rate_limited_total",
+    "Requests refused by a limit, by what was hit. 'budget' means the tenant is out of money "
+    "for the day, not that the service is busy.",
+    ["scope", "reason"],
+)
+LLM_FAILOVER = Counter(
+    "sda_llm_failover_total",
+    "Generation attempts handed to the next provider in the chain.",
+    ["from_provider", "to_provider"],
+)
+LLM_BREAKER_OPEN = Gauge(
+    "sda_llm_breaker_open",
+    "1 while a provider's breaker is open and it is being skipped.",
+    ["provider"],
+    # The breaker is per process: any worker reporting an outage is worth alerting on.
+    multiprocess_mode="max",
+)
 ANSWER_CACHE = Counter("sda_answer_cache_total", "Answer cache lookups.", ["result"])
+QUERIES_ABANDONED = Counter(
+    "sda_queries_abandoned_total",
+    "Queries that did not produce an answer: the caller disconnected, the deadline passed, or "
+    "the API shed the load. A rising 'shed' share is the signal to add replicas.",
+    ["reason"],
+)
+QUERIES_IN_FLIGHT = Gauge(
+    "sda_queries_in_flight",
+    "Queries holding a worker slot. Against api.query_concurrency this is the saturation gauge.",
+    multiprocess_mode="livesum",
+)
+
+REINDEXED_DOCUMENTS = Counter(
+    "sda_reindexed_documents_total", "Documents rebuilt by the reindex worker."
+)
+REINDEX_PENDING = Gauge(
+    "sda_reindex_pending_documents",
+    "Documents not yet built at the version the running configuration would produce. Nonzero "
+    "for long means a chunker or embedder change has not been rolled out.",
+    multiprocess_mode="max",
+)
+RETENTION_OVERDUE = Gauge(
+    "sda_retention_overdue_documents",
+    "Soft-deleted documents past their purge window and still present. Nonzero for long means "
+    "the sweep is not running -- which nothing else notices until the disk fills.",
+    multiprocess_mode="max",
+)
+RETENTION_PURGED = Counter(
+    "sda_retention_purged_total",
+    "Rows removed by the retention sweep, by what they were. A sustained zero on 'documents' "
+    "while deletes are happening means the sweep is not running.",
+    ["kind"],
+)
+
+WEBHOOK_DELIVERIES = Counter(
+    "sda_webhook_deliveries_total",
+    "Outbound ingest callbacks, after all retries. A 'failed' run disables the subscription.",
+    ["event", "result"],
+)
 
 INGEST_JOBS = Counter("sda_ingest_jobs_total", "Ingest jobs by outcome.", ["outcome"])
 INGEST_DURATION = Histogram(

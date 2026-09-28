@@ -56,6 +56,15 @@ class GenerationError(Exception):
         super().__init__(message)
 
 
+class QueryCancelled(Exception):
+    """The caller is gone or out of time. Raised inside the answering thread so the provider
+    stream is closed rather than billed to completion."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 class ConfigError(Exception):
     def __init__(self, message: str) -> None:
         self.message = message
@@ -81,4 +90,15 @@ class PermissionDenied(Exception):
 
     def __init__(self, message: str) -> None:
         self.message = message
+        super().__init__(message)
+
+
+class RateLimited(Exception):
+    """Caller exceeded a rate limit or a spend budget. `retry_after_s` is what the client is
+    told to wait: the refill time for a bucket, the seconds to midnight UTC for a budget."""
+
+    def __init__(self, message: str, retry_after_s: int, scope: str) -> None:
+        self.message = message
+        self.retry_after_s = retry_after_s
+        self.scope = scope
         super().__init__(message)
