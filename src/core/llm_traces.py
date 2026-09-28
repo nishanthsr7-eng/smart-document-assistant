@@ -12,6 +12,7 @@ from langfuse import Langfuse, LangfuseOtelSpanAttributes
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.trace import Span
 
+from src.core import redaction
 from src.core.config import SETTINGS
 
 _client: Optional[Langfuse] = None
@@ -111,4 +112,6 @@ def annotate_observation(
 
 
 def _dumps(value: Any) -> str:
-    return value if isinstance(value, str) else json.dumps(value, default=str)
+    """Every payload leaving for Langfuse goes through here, which is where PII is masked."""
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    return redaction.scrub(text)

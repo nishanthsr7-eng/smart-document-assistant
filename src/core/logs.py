@@ -7,6 +7,7 @@ from typing import Any, MutableMapping
 import structlog
 from opentelemetry import trace as otel_trace
 
+from src.core import redaction
 from src.core.config import SETTINGS
 
 _configured = False
@@ -23,6 +24,7 @@ def setup(role: str) -> None:
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         _add_trace_ids,
+        _redact,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
@@ -66,6 +68,15 @@ def _add_trace_ids(
     if context.is_valid:
         event_dict["trace_id"] = format(context.trace_id, "032x")
         event_dict["span_id"] = format(context.span_id, "016x")
+    return event_dict
+
+
+def _redact(
+    logger: Any, method: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
+    """Mask PII in every line, including the ones uvicorn and sqlalchemy emit."""
+    for key, value in event_dict.items():
+        event_dict[key] = redaction.scrub_value(value)
     return event_dict
 
 
