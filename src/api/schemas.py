@@ -11,6 +11,9 @@ class QueryRequest(BaseModel):
     mode: str = SETTINGS.retrieval.mode
     generate: bool = True
     history: list[tuple[str, str]] = Field(default_factory=list)
+    # False answers in one JSON response instead of an SSE stream. Tokens are still generated
+    # the same way; the difference is only whether the caller sees them arrive.
+    stream: bool = True
 
 
 class RegisterRequest(BaseModel):
@@ -36,6 +39,22 @@ class UserOut(BaseModel):
     role: str
     tenant_id: str
     tenant_name: str
+
+
+class ErasureReceipt(BaseModel):
+    """Proof of a right-to-erasure request. `complete` is the verification pass, not a claim:
+    it is false unless a re-read of every store found nothing left."""
+
+    subject_user_id: str
+    tenant_id: str
+    erased_at: str
+    doc_ids: list[str]
+    deleted: dict[str, int]
+    redacted: dict[str, int]
+    remaining: dict[str, int]
+    retained: dict[str, str]
+    complete: bool
+    digest: str
 
 
 class TokenResponse(BaseModel):
@@ -120,6 +139,65 @@ class DocumentOut(BaseModel):
     pages: int
     num_children: int
     owner_id: str
+
+
+class DocumentPage(BaseModel):
+    """`next_cursor` is None on the last page. It is opaque: pass it back, do not parse it."""
+
+    items: list[DocumentOut]
+    next_cursor: Optional[str] = None
+
+
+class DocumentVersionOut(BaseModel):
+    doc_id: str
+    version: int
+    pages: int
+    num_children: int
+    created_at: str
+    superseded_by: Optional[str]
+    deleted_at: Optional[str]
+    current: bool
+
+
+class IndexStatusOut(BaseModel):
+    """`reindex_needed` true means the running configuration would build a different index from
+    the one being read: a chunker or embedder change that has not been rolled out yet."""
+
+    active_version: Optional[str]
+    previous_version: Optional[str]
+    building_version: str
+    reindex_needed: bool
+    updated_at: Optional[str]
+    progress: dict[str, Any]
+
+
+class WebhookRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    events: list[str] = Field(default_factory=list)
+
+
+class WebhookOut(BaseModel):
+    webhook_id: str
+    url: str
+    events: list[str]
+    active: bool
+    consecutive_failures: int
+    last_error: Optional[str]
+    last_delivery_at: Optional[str]
+    created_at: Optional[str]
+
+
+class WebhookCreated(WebhookOut):
+    """The only response that carries the secret. It is not readable again."""
+
+    secret: str
+
+
+class BulkIngestOut(BaseModel):
+    """One entry per file, in request order. A rejected file carries its reason and no job."""
+
+    accepted: list[JobOut]
+    rejected: list[dict[str, Any]]
 
 
 class HealthResponse(BaseModel):
