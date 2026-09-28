@@ -1,11 +1,13 @@
 from functools import lru_cache
+from hmac import compare_digest
 from typing import Callable, Optional
 
-from fastapi import Depends
+from fastapi import Depends, Header, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.auth.principal import Principal
 from src.auth.tokens import decode_access_token
+from src.core.config import SETTINGS
 from src.core.errors import AuthError, PermissionDenied
 from src.generation.client import Provider, build_client
 from src.ingestion.parsers import FigureCaptioner
@@ -70,3 +72,24 @@ def _require(role: str) -> Callable[[Principal], Principal]:
 require_viewer = _require("viewer")
 require_editor = _require("editor")
 require_admin = _require("admin")
+
+
+def require_operator(
+    principal: Principal = Depends(require_admin),
+    token: Optional[str] = Header(default=None, alias="X-Operator-Token"),
+) -> Principal:
+    """A deployment-wide operation needs a deployment-level credential.
+
+    Reindexing and the retention sweep act on every tenant, so a tenant admin's own token is
+    the wrong authority for them. Unset `OPERATOR_TOKEN` disables these endpoints rather than
+    opening them: the failure mode of the other choice is one tenant rebuilding everyone's index.
+    """
+    expected = SETTINGS.security.operator_token
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="Operator endpoints are disabled: OPERATOR_TOKEN is not configured.",
+        )
+    if token is None or not compare_digest(token, expected):
+        raise PermissionDenied("A valid X-Operator-Token is required.")
+    return principal
