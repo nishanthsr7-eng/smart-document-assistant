@@ -45,7 +45,7 @@ def test_first_ingest_indexes(clean_state):
     report = _ingest_live("policy.txt", DOC)
     assert report.outcome == "indexed"
     assert report.num_children >= 1
-    assert objects.get_parents(report.doc_id)
+    assert objects.get_parents(report.doc_id, SETTINGS.ingest_version)
     with session() as sess:
         assert sess.scalar(select(func.count()).select_from(Chunk)) == report.num_children
 
@@ -64,10 +64,16 @@ def test_same_filename_new_content_replaces(clean_state):
     assert report.outcome == "replaced"
     assert report.replaced_doc_id == first.doc_id
     with session() as sess:
-        assert sess.scalar(select(func.count()).select_from(Document)) == 1
+        # The replaced document is kept as history for the retention window, pointing at what
+        # replaced it, but its index is gone: one filename, one answerable document.
+        replaced = sess.get(Document, first.doc_id)
+        assert replaced is not None
+        assert replaced.superseded_by == report.doc_id
+        assert sess.get(Document, report.doc_id).version == replaced.version + 1
         assert sess.scalar(
             select(func.count()).select_from(Chunk).where(Chunk.doc_id == first.doc_id)
         ) == 0
+    assert [e["doc_id"] for e in pipeline.list_indexed(OWNER.tenant_id)] == [report.doc_id]
 
 
 def test_ingest_stores_embeddings_and_lists_the_document(clean_state):
@@ -118,10 +124,84 @@ def test_concurrent_uploads_of_one_filename_keep_a_single_document(clean_state):
         reports = list(pool.map(lambda b: _ingest_live("policy.txt", b), bodies))
 
     with session() as sess:
-        docs = list(sess.scalars(select(Document)))
-        assert len(docs) == 1
-        assert docs[0].doc_id in {r.doc_id for r in reports}
+        live = list(sess.scalars(select(Document).where(Document.superseded_by.is_(None))))
+        assert len(live) == 1
+        assert live[0].doc_id in {r.doc_id for r in reports}
+        # Only the surviving document has chunks: superseding drops the old index even though
+        # it keeps the old row.
         orphans = sess.scalar(
-            select(func.count()).select_from(Chunk).where(Chunk.doc_id != docs[0].doc_id)
+            select(func.count()).select_from(Chunk).where(Chunk.doc_id != live[0].doc_id)
         )
         assert orphans == 0
+
+
+# --- ingest state machine ---
+
+
+def test_ingest_ends_live_after_passing_through_every_state(clean_state, monkeypatch):
+    seen: list[str] = []
+    real = pipeline._set_state
+
+    def record(doc_id, state, sess=None):
+        seen.append(state)
+        real(doc_id, state, sess)
+
+    monkeypatch.setattr(pipeline, "_set_state", record)
+    report = _ingest_live("policy.txt", DOC)
+
+    assert seen == [pipeline.INDEXED, pipeline.LIVE]
+    with session() as sess:
+        assert sess.get(Document, report.doc_id).state == pipeline.LIVE
+
+
+def test_a_crash_before_live_leaves_the_replaced_document_queryable(clean_state, monkeypatch):
+    """The regression: the old order purged the replaced document first, so a crash mid-ingest
+    left the tenant with neither the old document nor the new one."""
+    first = _ingest_live("policy.txt", DOC)
+    real = pipeline._set_state
+
+    def fail_on_live(doc_id, state, sess=None):
+        if state == pipeline.LIVE:
+            raise RuntimeError("worker died between indexed and live")
+        real(doc_id, state, sess)
+
+    monkeypatch.setattr(pipeline, "_set_state", fail_on_live)
+    with pytest.raises(RuntimeError):
+        _ingest_live("policy.txt", DOC + b"\n\nExtra clause added here.")
+
+    assert [e["doc_id"] for e in pipeline.list_indexed(OWNER.tenant_id)] == [first.doc_id]
+    assert pipeline.load_children(first.doc_id, OWNER.tenant_id)
+
+
+def test_chunks_and_the_indexed_state_commit_together(clean_state, monkeypatch):
+    """Both halves of one transaction: a document may never claim an index that is not there."""
+    real = pipeline._set_state
+
+    def fail_on_indexed(doc_id, state, sess=None):
+        if state == pipeline.INDEXED:
+            raise RuntimeError("crash inside the index transaction")
+        real(doc_id, state, sess)
+
+    monkeypatch.setattr(pipeline, "_set_state", fail_on_indexed)
+    with pytest.raises(RuntimeError):
+        _ingest_live("policy.txt", DOC)
+
+    with session() as sess:
+        assert sess.scalar(select(func.count()).select_from(Chunk)) == 0
+        assert sess.scalar(select(Document.state)) == pipeline.PARSED
+
+
+def test_a_half_finished_ingest_is_never_listed(clean_state, monkeypatch):
+    monkeypatch.setattr(
+        pipeline, "chunk_document", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("parse died"))
+    )
+    with pytest.raises(RuntimeError):
+        _ingest_live("policy.txt", DOC)
+
+    assert pipeline.list_indexed(OWNER.tenant_id) == []
+    with session() as sess:
+        # The row is the trace of where it stopped, and discard_failed is what sweeps it.
+        assert sess.scalar(select(Document.state)) == pipeline.PENDING
+    pipeline.discard_failed(pipeline.doc_id_for(OWNER.tenant_id, DOC))
+    with session() as sess:
+        assert sess.scalar(select(func.count()).select_from(Document)) == 0

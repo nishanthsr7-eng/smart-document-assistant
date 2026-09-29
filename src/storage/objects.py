@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Any
+from typing import IO, Any, Union
 
 import boto3
 from botocore.client import Config
@@ -34,7 +34,8 @@ def ensure_bucket() -> None:
         client.create_bucket(Bucket=bucket)
 
 
-def put_raw(doc_id: str, filename: str, data: bytes) -> str:
+def put_raw(doc_id: str, filename: str, data: Union[bytes, IO[bytes]]) -> str:
+    """Body may be a file object: the API stages a spooled upload without reading it into RAM."""
     key = f"{_RAW_PREFIX}/{doc_id}/{filename}"
     _client().put_object(Bucket=SETTINGS.storage.s3_bucket, Key=key, Body=data)
     return key
@@ -49,30 +50,63 @@ def get_raw(doc_id: str, filename: str) -> bytes:
         raise StorageError(f"Staged upload missing for document {doc_id}.") from exc
 
 
-def put_parents(doc_id: str, payload: bytes) -> str:
-    key = f"{_PARENTS_PREFIX}/{doc_id}.json"
+def put_parents(doc_id: str, ingest_version: str, payload: bytes) -> str:
+    """Keyed by build as well as document: a reindex writes the new parents beside the old ones,
+    so the index being rebuilt and the index being read never share a blob."""
+    key = _parents_key(doc_id, ingest_version)
     _client().put_object(
         Bucket=SETTINGS.storage.s3_bucket, Key=key, Body=payload, ContentType="application/json"
     )
     return key
 
 
-def get_parents(doc_id: str) -> bytes:
-    key = f"{_PARENTS_PREFIX}/{doc_id}.json"
+def get_parents(doc_id: str, ingest_version: str) -> bytes:
+    key = _parents_key(doc_id, ingest_version)
     try:
         body: bytes = _client().get_object(Bucket=SETTINGS.storage.s3_bucket, Key=key)["Body"].read()
         return body
     except ClientError as exc:
-        raise StorageError(f"Parent blob missing for document {doc_id}.") from exc
+        raise StorageError(
+            f"Parent blob missing for document {doc_id} at build {ingest_version}."
+        ) from exc
 
 
-def delete_doc(doc_id: str) -> None:
+def _parents_key(doc_id: str, ingest_version: str) -> str:
+    return f"{_PARENTS_PREFIX}/{doc_id}/{ingest_version}.json"
+
+
+def list_doc_keys(doc_id: str) -> list[str]:
+    """Every key holding this document's bytes. Used to verify an erasure actually erased."""
     client = _client()
     bucket = SETTINGS.storage.s3_bucket
     listing = client.list_objects_v2(Bucket=bucket, Prefix=f"{_RAW_PREFIX}/{doc_id}/")
-    keys = [{"Key": obj["Key"]} for obj in listing.get("Contents", [])]
-    keys.append({"Key": f"{_PARENTS_PREFIX}/{doc_id}.json"})
-    client.delete_objects(Bucket=bucket, Delete={"Objects": keys})
+    keys = [obj["Key"] for obj in listing.get("Contents", [])]
+    parents = client.list_objects_v2(Bucket=bucket, Prefix=f"{_PARENTS_PREFIX}/{doc_id}/")
+    return keys + [obj["Key"] for obj in parents.get("Contents", [])]
+
+
+def delete_doc(doc_id: str) -> None:
+    delete_keys(list_doc_keys(doc_id))
+
+
+# S3's DeleteObjects takes at most 1000 keys per call and rejects the request outright past
+# that, so the batching is the API's, not an optimisation.
+_DELETE_BATCH = 1000
+
+
+def delete_keys(keys: list[str]) -> None:
+    client = _client()
+    bucket = SETTINGS.storage.s3_bucket
+    for start in range(0, len(keys), _DELETE_BATCH):
+        batch = keys[start : start + _DELETE_BATCH]
+        client.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch]})
+
+
+def delete_parents(doc_id: str, ingest_version: str) -> None:
+    """Drop one build's parents, leaving the document's other builds and its raw bytes alone."""
+    _client().delete_object(
+        Bucket=SETTINGS.storage.s3_bucket, Key=_parents_key(doc_id, ingest_version)
+    )
 
 
 def health() -> None:

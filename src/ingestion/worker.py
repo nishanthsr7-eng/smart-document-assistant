@@ -3,17 +3,19 @@ import logging
 import time
 from dataclasses import asdict
 
+from arq import cron
 from prometheus_client import start_http_server
 
-from src.api import deps
+from src.api import deps, webhooks
 from src.auth import audit
 from src.auth.principal import Principal
 from src.core import logs, metrics, observability, otel
 from src.core.config import SETTINGS
 from src.core.errors import DocumentError
-from src.ingestion import jobs
-from src.ingestion.pipeline import discard_failed, ingest
+from src.ingestion import jobs, reindex
+from src.ingestion.pipeline import discard_failed, ingest, sweep_expired
 from src.storage import objects
+from src.storage.redis_client import lock
 
 observability.setup("worker")
 logger = logs.logger(__name__)
@@ -23,7 +25,24 @@ async def ingest_job(
     ctx: dict, doc_id: str, filename: str, job_id: str, owner: dict
 ) -> dict:
     """Parse, chunk, embed and index a staged upload. Runs off the API's event loop."""
-    return await asyncio.to_thread(_run, job_id, doc_id, filename, Principal(**owner))
+    principal = Principal(**owner)
+    try:
+        report = await asyncio.to_thread(_run, job_id, doc_id, filename, principal)
+    except Exception as exc:
+        # After the job's own failure handling, and never in place of it: a callback is how a
+        # caller hears about the outcome, not part of producing it.
+        await webhooks.dispatch(
+            principal.tenant_id,
+            webhooks.INGEST_FAILED,
+            {"job_id": job_id, "doc_id": doc_id, "filename": filename, "error": str(exc)},
+        )
+        raise
+    await webhooks.dispatch(
+        principal.tenant_id,
+        webhooks.INGEST_COMPLETED,
+        {"job_id": job_id, "doc_id": doc_id, "filename": filename, "report": report},
+    )
+    return report
 
 
 def _run(job_id: str, doc_id: str, filename: str, owner: Principal) -> dict:
@@ -84,6 +103,28 @@ def _fail(
     discard_failed(doc_id)
 
 
+async def reindex_job(ctx: dict) -> dict:
+    """Rebuild the index at the running configuration's version and cut over to it.
+
+    Serialized on a Redis lock: two workers rebuilding the same documents would race on the
+    same chunk rows, and the second cutover would promote a version the first was still writing.
+    """
+    with lock(reindex.LOCK_KEY, SETTINGS.jobs.job_timeout_s, wait_s=0.5):
+        return await asyncio.to_thread(reindex.run, deps.embedder(), deps.figure_captioner())
+
+
+async def retention_sweep(ctx: dict) -> dict:
+    """Hard-delete what has outlived its window. Runs on a schedule, never on a request."""
+    if not SETTINGS.retention.enabled:
+        return {"skipped": True}
+    result = await asyncio.to_thread(sweep_expired)
+    for kind, count in result.items():
+        if count:
+            metrics.RETENTION_PURGED.labels(kind.removesuffix("_purged")).inc(count)
+    logger.info("Retention sweep", extra=result)
+    return result
+
+
 async def startup(ctx: dict) -> None:
     # arq's CLI installs its own plain-text handler after import, which duplicates every line
     # next to the JSON one. Dropping it here runs after that configuration.
@@ -98,7 +139,10 @@ async def shutdown(ctx: dict) -> None:
 
 
 class WorkerSettings:
-    functions = [ingest_job]
+    functions = [ingest_job, reindex_job, retention_sweep]
+    # Hourly and off the hour: a sweep is idempotent, and staggering it keeps it away from
+    # whatever else a deployment runs at :00.
+    cron_jobs = [cron(retention_sweep, minute=7, run_at_startup=False)]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = jobs.redis_settings()

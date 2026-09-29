@@ -41,15 +41,25 @@ def build_header(filename: str, section_path: tuple[str, ...]) -> str:
 
 
 def chunk_document(
-    elements: list[Element], doc_id: str, filename: str
+    elements: list[Element],
+    doc_id: str,
+    filename: str,
+    ingest_version: str = "",
 ) -> tuple[list[ParentChunk], list[ChildChunk]]:
+    """Ids carry the build that produced them.
+
+    Without that, reindexing a document under new chunker settings would collide with its own
+    existing rows, and the two builds could not coexist -- which is the whole premise of
+    rebuilding an index while the old one is still serving reads.
+    """
+    version = ingest_version or SETTINGS.ingest_version
     parents: list[ParentChunk] = []
     children: list[ChildChunk] = []
 
     for group in _group_into_parents(elements):
-        parent = _build_parent(group, doc_id, filename, len(parents))
+        parent = _build_parent(group, doc_id, filename, len(parents), version)
         parents.append(parent)
-        children.extend(_build_children(parent, len(children)))
+        children.extend(_build_children(parent, len(children), version))
 
     return parents, children
 
@@ -86,11 +96,13 @@ def _group_into_parents(elements: list[Element]) -> list[list[Element]]:
     return groups
 
 
-def _build_parent(group: list[Element], doc_id: str, filename: str, index: int) -> ParentChunk:
+def _build_parent(
+    group: list[Element], doc_id: str, filename: str, index: int, version: str
+) -> ParentChunk:
     kind = group[0].kind if group[0].kind in ("table", "figure") else "prose"
     text = group[0].text if kind in ("table", "figure") else "\n".join(e.text for e in group)
     return ParentChunk(
-        parent_id=f"{doc_id}:p{index}",
+        parent_id=f"{doc_id}@{version}:p{index}",
         doc_id=doc_id,
         filename=filename,
         text=text,
@@ -101,7 +113,7 @@ def _build_parent(group: list[Element], doc_id: str, filename: str, index: int) 
     )
 
 
-def _build_children(parent: ParentChunk, start_index: int) -> list[ChildChunk]:
+def _build_children(parent: ParentChunk, start_index: int, version: str) -> list[ChildChunk]:
     if parent.kind in ("table", "figure"):
         windows = _atomic_windows(parent.text)
     else:
@@ -112,7 +124,7 @@ def _build_children(parent: ParentChunk, start_index: int) -> list[ChildChunk]:
     for offset, (span_text, span) in enumerate(windows):
         children.append(
             ChildChunk(
-                chunk_id=f"{parent.doc_id}:c{start_index + offset}",
+                chunk_id=f"{parent.doc_id}@{version}:c{start_index + offset}",
                 parent_id=parent.parent_id,
                 doc_id=parent.doc_id,
                 filename=parent.filename,

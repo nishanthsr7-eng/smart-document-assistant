@@ -29,19 +29,32 @@ class Element:
     section_path: tuple[str, ...] = field(default_factory=tuple)
 
 
-def validate_upload(filename: str, data: bytes) -> str:
+MAGIC_BYTES = len(_PDF_MAGIC)
+
+
+def allowed_extension(filename: str) -> str:
+    """The one check that can run before a single byte of the body is read."""
     extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if extension not in _ALLOWED_EXTENSIONS:
         raise UnsupportedFormat(extension or filename)
+    return extension
+
+
+def check_magic(extension: str, head: bytes) -> None:
+    if extension == "pdf" and not head.startswith(_PDF_MAGIC):
+        raise UnsupportedFormat("pdf")
+    if extension == "txt" and head.startswith(_PDF_MAGIC):
+        raise UnsupportedFormat("pdf")
+
+
+def validate_upload(filename: str, data: bytes) -> str:
+    extension = allowed_extension(filename)
     if not data:
         raise EmptyDocument()
     max_bytes = SETTINGS.ingestion.max_upload_mb * 1024 * 1024
     if len(data) > max_bytes:
         raise DocumentTooLarge(SETTINGS.ingestion.max_upload_mb)
-    if extension == "pdf" and not data.startswith(_PDF_MAGIC):
-        raise UnsupportedFormat("pdf")
-    if extension == "txt" and data.startswith(_PDF_MAGIC):
-        raise UnsupportedFormat("pdf")
+    check_magic(extension, data[:MAGIC_BYTES])
     return extension
 
 

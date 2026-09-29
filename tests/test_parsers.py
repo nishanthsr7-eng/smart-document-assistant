@@ -1,10 +1,10 @@
 import io
-from dataclasses import replace
 
+import anyio
 import pytest
 from pypdf import PdfWriter
 
-from src.core.config import SETTINGS
+from src.core.config import SETTINGS, replace
 from src.core.errors import (
     DocumentTooLarge,
     DocumentTooManyPages,
@@ -13,8 +13,9 @@ from src.core.errors import (
     ScannedDocument,
     UnsupportedFormat,
 )
-from src.ingestion import parsers
+from src.ingestion import parsers, upload
 from src.ingestion.parsers import parse_pdf, parse_txt, validate_upload
+from src.ingestion.pipeline import doc_id_for, doc_id_for_stream
 
 
 def _blank_pdf(pages: int = 2, encrypt: str | None = None) -> bytes:
@@ -123,3 +124,77 @@ def test_scanned_pdf_goes_through_ocr():
     text = " ".join(e.text for e in elements).lower()
     assert "leave" in text
     assert any(e.kind in ("paragraph", "list_item", "table") for e in elements)
+
+
+# --- streaming upload receipt ---
+
+
+async def _feed(data: bytes, step: int = 7):
+    for start in range(0, len(data), step):
+        yield data[start : start + step]
+
+
+def test_receive_spools_body_and_reports_size():
+    staged = anyio.run(upload.receive, "a.txt", _feed(b"hello world"))
+    try:
+        assert staged.extension == "txt"
+        assert staged.size == 11
+        assert staged.body.read() == b"hello world"
+    finally:
+        staged.close()
+
+
+def test_receive_rejects_extension_before_reading_the_body():
+    consumed = []
+
+    async def watched():
+        consumed.append(1)
+        yield b"hello"
+
+    with pytest.raises(UnsupportedFormat):
+        anyio.run(upload.receive, "notes.md", watched())
+    assert consumed == []
+
+
+def test_receive_stops_reading_once_the_cap_is_passed():
+    cap = SETTINGS.ingestion.max_upload_mb * 1024 * 1024
+    step = 1024 * 1024
+    served = 0
+
+    async def endless():
+        nonlocal served
+        while True:
+            served += step
+            yield b"x" * step
+
+    with pytest.raises(DocumentTooLarge):
+        anyio.run(upload.receive, "big.txt", endless())
+    # The point of streaming: the body stops being read one chunk past the cap rather than
+    # being made resident in full first.
+    assert served <= cap + step
+
+
+def test_receive_rejects_spoofed_pdf_mid_stream():
+    with pytest.raises(UnsupportedFormat):
+        anyio.run(upload.receive, "fake.pdf", _feed(b"this is not a pdf"))
+
+
+def test_receive_rejects_short_spoofed_pdf():
+    with pytest.raises(UnsupportedFormat):
+        anyio.run(upload.receive, "tiny.pdf", _feed(b"%PD"))
+
+
+def test_receive_rejects_empty_body():
+    with pytest.raises(EmptyDocument):
+        anyio.run(upload.receive, "empty.txt", _feed(b""))
+
+
+def test_streamed_doc_id_matches_the_resident_one():
+    data = b"%PDF-1.7 " + b"payload" * 1000
+    staged = anyio.run(upload.receive, "a.pdf", _feed(data, step=333))
+    try:
+        assert doc_id_for_stream("tenant-a", staged.body) == doc_id_for("tenant-a", data)
+        # Rewound for the caller that stages it to the object store.
+        assert staged.body.read() == data
+    finally:
+        staged.close()
