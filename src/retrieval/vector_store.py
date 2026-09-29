@@ -1,9 +1,13 @@
 from dataclasses import dataclass
+from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.orm import Session
 
+from src.core.config import SETTINGS
 from src.ingestion.chunker import ChildChunk, build_header
+from src.storage import alias
 from src.storage.db import session
 from src.storage.models import Chunk
 
@@ -30,31 +34,58 @@ class VectorStore:
     than in callers so no call site can forget it: an omitted argument is a type error.
     """
 
-    def add(self, children: list[ChildChunk], embeddings: list[list[float]], tenant_id: str) -> None:
+    def add(
+        self,
+        children: list[ChildChunk],
+        embeddings: list[list[float]],
+        tenant_id: str,
+        sess: Optional[Session] = None,
+        ingest_version: Optional[str] = None,
+    ) -> None:
+        """Pass `sess` to enrol the index write in the caller's transaction.
+
+        Ingest does: the document row that claims these chunks and the chunks themselves must
+        commit together, or a crash between the two leaves a document asserting an index that
+        is not there.
+        """
         if not children:
             return
+        version = ingest_version or SETTINGS.ingest_version
         rows = [
-            {**_row(child, i, tenant_id), "embedding": embedding}
+            {**_row(child, i, tenant_id, version), "embedding": embedding}
             for i, (child, embedding) in enumerate(zip(children, embeddings, strict=True))
         ]
-        with session() as sess:
-            stmt = insert(Chunk).values(rows)
-            sess.execute(
-                stmt.on_conflict_do_update(
-                    index_elements=[Chunk.chunk_id],
-                    set_={"embedding": stmt.excluded.embedding, "text": stmt.excluded.text},
-                )
-            )
+        stmt = insert(Chunk).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[Chunk.chunk_id],
+            set_={
+                "embedding": stmt.excluded.embedding,
+                "text": stmt.excluded.text,
+                # Re-writing a chunk re-dates it to the build that wrote it. Ids normally
+                # differ between builds, so this only fires when the same build writes twice --
+                # a retried ingest -- and then the version it claims must be the current one.
+                "ingest_version": stmt.excluded.ingest_version,
+            },
+        )
+        if sess is not None:
+            sess.execute(stmt)
+            return
+        with session() as own:
+            own.execute(stmt)
 
     def query(self, vector: list[float], k: int, doc_ids: list[str], tenant_id: str) -> list[Hit]:
         if not doc_ids:
             return []
+        # Pinned to the alias, not to the running configuration: during a reindex both builds'
+        # chunks are in this table, and a read must see exactly one of them.
+        version = alias.active_version()
         distance = Chunk.embedding.cosine_distance(vector)
         with session() as sess:
             stmt = (
                 select(Chunk, distance.label("distance"))
                 .where(
                     Chunk.tenant_id == tenant_id,
+                    Chunk.ingest_version == version,
                     Chunk.doc_id.in_(doc_ids),
                     Chunk.embedding.isnot(None),
                 )
@@ -73,11 +104,12 @@ class VectorStore:
             return {cid: list(vec) for cid, vec in sess.execute(stmt) if vec is not None}
 
 
-def _row(c: ChildChunk, ordinal: int, tenant_id: str) -> dict:
+def _row(c: ChildChunk, ordinal: int, tenant_id: str, ingest_version: str) -> dict:
     return {
         "chunk_id": c.chunk_id,
         "doc_id": c.doc_id,
         "tenant_id": tenant_id,
+        "ingest_version": ingest_version,
         "parent_id": c.parent_id,
         "ordinal": ordinal,
         "filename": c.filename,
