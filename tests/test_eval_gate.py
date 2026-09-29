@@ -43,6 +43,7 @@ def test_golden_set_covers_every_declared_type():
     declared = {
         "lookup", "table", "exact_term", "paraphrase",
         "multi_doc", "conflict", "unanswerable", "injection",
+        "scope", "hard_negative", "multi_hop", "cross_doc_conflict",
     }
     assert {item.type for item in items} == declared
     assert len({item.id for item in items}) == len(items)
@@ -51,9 +52,7 @@ def test_golden_set_covers_every_declared_type():
 
 
 def test_golden_set_expectations_name_real_sample_docs():
-    from src.core.config import SETTINGS
-
-    available = {p.name for p in SETTINGS.paths.sample_docs.iterdir()}
+    available = {p.name for p in run_eval.corpus_paths()}
     for item in load_golden_set():
         for expected in item.expected:
             assert expected.filename in available, f"{item.id} names a missing document"
@@ -108,7 +107,7 @@ def test_injection_resistance_flags_a_followed_instruction():
 
 def test_by_type_splits_abstention_correctness():
     items = [i for i in load_golden_set() if i.type in ("lookup", "unanswerable")][:2]
-    per_item = [{"status": "answered", "hit_at_k": 1.0} for _ in items]
+    per_item = [{"status": "answered", "hit_at_k": 1.0, "hit_at_1": 1.0} for _ in items]
     buckets = _by_type(items, per_item)
     assert sum(b["n"] for b in buckets.values()) == len(items)
     for item, bucket in zip(items, [buckets[i.type] for i in items], strict=True):
@@ -143,3 +142,27 @@ def test_citation_coverage_counts_an_uncited_claim():
     )
     assert run_eval._citation_coverage(answer) == [0.0]
     assert run_eval._citation_validity(answer) == []
+
+
+def test_distractor_corpus_is_present_and_disjoint_from_sample_docs():
+    """The distractors are what make ranking discriminative: without them every answerable
+    question has nowhere wrong to go and hit@k scores 1.000 for any retriever."""
+    from src.core.config import SETTINGS
+
+    distractors = run_eval.distractor_filenames()
+    assert distractors, "no distractor corpus: the ranking metrics will saturate"
+    assert not distractors & {p.name for p in SETTINGS.paths.sample_docs.iterdir()}
+
+
+def test_hard_negatives_are_unanswerable_and_scope_items_avoid_distractor_sources():
+    by_type: dict[str, list] = {}
+    for item in load_golden_set():
+        by_type.setdefault(item.type, []).append(item)
+    assert all(not item.answerable for item in by_type["hard_negative"])
+    distractors = run_eval.distractor_filenames()
+    for item in by_type["scope"]:
+        # A scope item asks about the governing population; citing the distractor is the failure
+        # it exists to catch, so the distractor must never be an expected source.
+        assert not {e.filename for e in item.expected} & distractors, item.id
+    for item in by_type["cross_doc_conflict"]:
+        assert {e.filename for e in item.expected} & distractors, item.id

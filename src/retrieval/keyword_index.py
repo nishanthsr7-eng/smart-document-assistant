@@ -3,6 +3,7 @@ import re
 from sqlalchemy import func, select
 
 from src.retrieval.vector_store import Hit, to_hit
+from src.storage import alias
 from src.storage.db import session
 from src.storage.models import Chunk
 
@@ -37,6 +38,8 @@ class KeywordIndex:
                 select(Chunk, rank.label("rank"))
                 .where(
                     Chunk.tenant_id == tenant_id,
+                    # The same alias the dense side reads: one build answers a query, never two.
+                    Chunk.ingest_version == alias.active_version(),
                     Chunk.doc_id.in_(doc_ids),
                     Chunk.tsv.op("@@")(tsquery),
                     rank > 0,

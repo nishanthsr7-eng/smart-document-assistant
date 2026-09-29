@@ -1,4 +1,18 @@
-# type in {lookup, table, exact_term, paraphrase, multi_doc, conflict, unanswerable, injection}
+# type in {lookup, table, exact_term, paraphrase, multi_doc, conflict, unanswerable, injection,
+#          scope, hard_negative, multi_hop, cross_doc_conflict}
+#
+# The first 33 items (through inj-02) are scored against the three documents in data/sample_docs.
+# Everything below them additionally depends on the distractor corpus in evaluation/data/corpus/,
+# which states near-miss numbers for populations the question is not about. The four types added
+# with it are the ones the original set could not express:
+#
+#   scope              -- the corpus contains a competing number for a different population, and
+#                         the question names the governing one. Ranking has somewhere wrong to go.
+#   hard_negative      -- the topic is covered; the specific fact is stated nowhere. Refusing an
+#                         absent 401(k) policy is easy, refusing an absent carryover ceiling in a
+#                         document whose table of contents names "Annual Leave Ceilings" is not.
+#   multi_hop          -- the answer requires chaining two facts; neither passage alone contains it.
+#   cross_doc_conflict -- two documents genuinely disagree, and both belong in the answer.
 - id: lp-01
   question: How many hours of sick leave does a full-time employee accrue for each 80-hour biweekly pay period?
   answerable: true
@@ -228,3 +242,207 @@
   type: injection
   expected:
     - {filename: employee_handbook.pdf, page: 7, must_contain: "12 weeks"}
+
+# --- scope: a distractor states a competing number for a different population ---------------
+# contractor_handbook 3 h/pp, state_leave_supplement 5 h/pp, leave_policy 4 h/pp.
+- id: scope-01
+  question: How many hours of sick leave does a full-time Federal employee accrue each biweekly pay period?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: leave_policy.pdf, page: 10, must_contain: "4 hours"}
+
+# contractor 10 weeks, state 14 weeks in 24 months, handbook 12 weeks in 12 months.
+- id: scope-02
+  question: Under the Family and Medical Leave Act, how many weeks of leave is an eligible Federal employee entitled to in a 12-month period?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: employee_handbook.pdf, page: 7, must_contain: "12 weeks"}
+
+# contractor 24 h funeral, state 40 h bereavement, handbook 104 h.
+- id: scope-03
+  question: How many hours of sick leave may a Federal employee use for bereavement purposes in a leave year, as distinct from any contractor or state funeral leave provision?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: employee_handbook.pdf, page: 6, must_contain: "104 hours"}
+
+# contractor 56 h, state 240 h, handbook 480 h.
+- id: scope-04
+  question: What is the total sick leave a Federal employee may use in a leave year to care for a family member with a serious health condition?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: employee_handbook.pdf, page: 3, must_contain: "480 hours"}
+
+# state 9 h/pp at 15+ years, leave_policy 8 h/pp.
+- id: scope-05
+  question: A Federal employee with 20 years of service works full time. How many hours of annual leave do they accrue each pay period under the Federal schedule?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: leave_policy.pdf, page: 7, must_contain: "8 hours"}
+
+# state 5 h/pp under 3 years, leave_policy 4 h/pp.
+- id: scope-06
+  question: Under the Federal annual leave schedule, what does a full-time employee with less than 3 years of service accrue each pay period?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: leave_policy.pdf, page: 7, must_contain: "4 hours"}
+
+# contractor 7:30 a.m. to 4 p.m., state 8:30 a.m. to 5 p.m., leave_policy 8 a.m. to 4:30 p.m.
+- id: scope-07
+  question: What are the official office hours of the FAS, RMA and FSA National Office, not the contractor duty day or the state public hours?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: leave_policy.pdf, page: 6, must_contain: "8 a.m. to 4:30 p.m."}
+
+# contractor core hours 10 a.m. to 2:30 p.m., leave_policy FAS 9:30 a.m. to 3:30 p.m.
+- id: scope-08
+  question: What are the core hours for all FAS employees under the Federal policy?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: leave_policy.pdf, page: 6, must_contain: "9:30 a.m. to 3:30 p.m."}
+
+# ethics addendum 60 days for intermittent advisors, company_policy 130 days for an SGE.
+- id: scope-09
+  question: How many days may a special Government employee be employed during a consecutive 365-day period?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: company_policy.txt, page: 1, must_contain: "130 days"}
+
+# contractor documentation after 3 consecutive duty days, within 10 calendar days.
+- id: scope-10
+  question: Under the Federal leave policy, what must an employee furnish to support a request for leave?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: leave_policy.pdf, page: 4, must_contain: "documentation"}
+
+# Part-time Federal accrual, against the contractor "1 hour for each 25 hours" prorating rule.
+- id: scope-11
+  question: For a part-time Federal employee, one hour of sick leave accrues for every how many hours in a pay status?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: leave_policy.pdf, page: 12, must_contain: "20 hours"}
+
+- id: scope-12
+  question: Under the Federal schedule, a part-time employee with at least 3 years but less than 15 years of service accrues 1 hour of annual leave for every how many hours in pay status?
+  answerable: true
+  type: scope
+  expected:
+    - {filename: leave_policy.pdf, page: 9, must_contain: "13 hours"}
+
+# --- hard_negative: topic covered, specific fact stated nowhere -----------------------------
+- id: hneg-01
+  question: What is the maximum number of annual leave hours a full-time Federal employee may carry over into the next leave year?
+  answerable: false
+  type: hard_negative
+  expected: []
+
+- id: hneg-02
+  question: What is the dollar value limit on a gift that a Federal employee may accept from a prohibited source?
+  answerable: false
+  type: hard_negative
+  expected: []
+
+- id: hneg-03
+  question: What is the maximum amount of advanced sick leave an agency may grant to a Federal employee?
+  answerable: false
+  type: hard_negative
+  expected: []
+
+- id: hneg-04
+  question: How long must a newly hired Federal employee wait before they are permitted to use accrued sick leave?
+  answerable: false
+  type: hard_negative
+  expected: []
+
+- id: hneg-05
+  question: What percentage of an unused Federal sick leave balance is credited toward the retirement annuity of the employee?
+  answerable: false
+  type: hard_negative
+  expected: []
+
+- id: hneg-06
+  question: What are the core hours during which employees in state-funded positions must be present?
+  answerable: false
+  type: hard_negative
+  expected: []
+
+- id: hneg-07
+  question: How many hours of paid time off does a contractor employee with exactly 2 years of service forfeit if they separate in the middle of a benefit year?
+  answerable: false
+  type: hard_negative
+  expected: []
+
+# --- multi_hop: neither passage alone contains the answer -----------------------------------
+- id: hop-01
+  question: A full-time Federal employee has 18 years of service. How many hours of annual leave do they accrue each pay period, and what is the next lower accrual tier?
+  answerable: true
+  type: multi_hop
+  expected:
+    - {filename: leave_policy.pdf, page: 7, must_contain: "8 hours"}
+    - {filename: leave_policy.pdf, page: 7, must_contain: "6 hours"}
+
+- id: hop-02
+  question: Jordan was granted advanced sick leave to cover the recovery period her doctor certified after childbirth. How many hours was that, and how many weeks of recovery did it cover?
+  answerable: true
+  type: multi_hop
+  expected:
+    - {filename: employee_handbook.pdf, page: 9, must_contain: "240 hours"}
+    - {filename: employee_handbook.pdf, page: 9, must_contain: "6 weeks"}
+
+- id: hop-03
+  question: May an employee use sick leave to bond with a healthy newborn, and what did Jordan use for bonding with her son instead?
+  answerable: true
+  type: multi_hop
+  expected:
+    - {filename: employee_handbook.pdf, page: 5, must_contain: "may not use sick leave"}
+    - {filename: employee_handbook.pdf, page: 9, must_contain: "advanced annual leave"}
+
+- id: hop-04
+  question: A part-time Federal employee reports 100 hours in pay status in one pay period. How many of those hours are disregarded when computing the leave accrual?
+  answerable: true
+  type: multi_hop
+  expected:
+    - {filename: leave_policy.pdf, page: 9, must_contain: "80"}
+
+- id: hop-05
+  question: Does the 80-hour rule apply to part-time employees, and what is the rule?
+  answerable: true
+  type: multi_hop
+  expected:
+    - {filename: leave_policy.pdf, page: 8, must_contain: "80 hours"}
+    - {filename: leave_policy.pdf, page: 8, must_contain: "part-time"}
+
+# --- cross_doc_conflict: the documents genuinely disagree, and both belong in the answer -----
+- id: xdoc-01
+  question: How many weeks of family and medical leave are available, comparing the Federal FMLA entitlement with the contractor extended absence benefit?
+  answerable: true
+  type: cross_doc_conflict
+  expected:
+    - {filename: employee_handbook.pdf, page: 7, must_contain: "12 weeks"}
+    - {filename: contractor_handbook.txt, page: 1, must_contain: "10 weeks"}
+
+- id: xdoc-02
+  question: Compare the bereavement sick leave cap for a Federal employee with the bereavement cap in the state leave supplement.
+  answerable: true
+  type: cross_doc_conflict
+  expected:
+    - {filename: employee_handbook.pdf, page: 6, must_contain: "104 hours"}
+    - {filename: state_leave_supplement.txt, page: 1, must_contain: "40 hours"}
+
+- id: xdoc-03
+  question: How many days of service define a special Government employee under the ethics regulation, and how many define an intermittent advisor under the ethics guidance addendum?
+  answerable: true
+  type: cross_doc_conflict
+  expected:
+    - {filename: company_policy.txt, page: 1, must_contain: "130 days"}
+    - {filename: ethics_guidance_addendum.txt, page: 1, must_contain: "60 days"}

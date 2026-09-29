@@ -28,6 +28,12 @@ from src.storage.models import Tenant  # noqa: E402
 GOLDEN_SET = Path(__file__).parent / "golden_set.yaml"
 THRESHOLDS = Path(__file__).parent / "thresholds.yaml"
 RESULTS_DIR = Path(__file__).parent / "results"
+# Distractor documents: topically adjacent, deliberately near-miss numbers on the same subjects
+# as the demo corpus. They are evaluation-only -- ingesting them into `data/sample_docs` would
+# put fake policy in front of anyone running the app -- and they are what makes the ranking
+# metrics discriminative. With three documents that never disagree, hit@k has nowhere wrong to
+# go and scores 1.000 for a good retriever and a bad one alike.
+DISTRACTOR_DIR = Path(__file__).parent / "data" / "corpus"
 _NUMBER_RE = re.compile(r"\d[\d,.]*")
 
 # Models emit typographic punctuation -- non-breaking hyphens, curly quotes, thin spaces -- so a
@@ -106,10 +112,14 @@ def ensure_eval_tenant() -> None:
         sess.execute(stmt)
 
 
+def corpus_paths() -> list[Path]:
+    return sorted(SETTINGS.paths.sample_docs.iterdir()) + sorted(DISTRACTOR_DIR.glob("*.txt"))
+
+
 def ingest_sample_docs(embedder: Embedder) -> list[str]:
     ensure_eval_tenant()
     doc_ids = []
-    for path in sorted(SETTINGS.paths.sample_docs.iterdir()):
+    for path in corpus_paths():
         report = ingest(path.name, path.read_bytes(), embedder, EVAL_PRINCIPAL)
         doc_ids.append(report.doc_id)
     return doc_ids
@@ -139,8 +149,29 @@ def _retrieval_metrics(item: GoldenItem, hits: list[Hit]) -> dict:
                     first_rank = rank
     return {
         "hit_at_k": 1.0 if covered else 0.0,
+        # hit@1 is the metric a reranker swap actually moves. hit@k over ten candidates saturates
+        # as soon as the corpus is small enough that the right page is somewhere in the list.
+        "hit_at_1": 1.0 if first_rank == 1 else 0.0,
         "mrr": 1.0 / first_rank if first_rank else 0.0,
     }
+
+
+def distractor_filenames() -> set[str]:
+    return {path.name for path in DISTRACTOR_DIR.glob("*.txt")}
+
+
+def _distractor_leak(item: GoldenItem, answer: Answer) -> float | None:
+    """Fraction of assembled sources that are a distractor the question did not ask for.
+
+    The distractors state near-miss numbers for a population the question is not about, so a
+    cited distractor is a wrong answer waiting to happen -- and it is invisible to recall, which
+    only asks whether the right page was also there. A cross_doc_conflict item expects a
+    distractor, so a source naming one of its expected documents is not a leak.
+    """
+    if not answer.sources:
+        return None
+    distractors = distractor_filenames() - {e.filename for e in item.expected}
+    return sum(1 for s in answer.sources if s.filename in distractors) / len(answer.sources)
 
 
 def _context_metrics(item: GoldenItem, answer: Answer) -> dict:
@@ -326,8 +357,9 @@ def run(mode: str, generate: bool) -> dict:
     items = load_golden_set()
     per_item = []
     stage_durations: dict[str, list[float]] = {}
-    hit_at_k, mrr = [], []
+    hit_at_k, hit_at_1, mrr = [], [], []
     context_recall, context_precision = [], []
+    distractor_leak = []
     must_contain = []
     citation_validity = []
     citation_coverage = []
@@ -336,6 +368,11 @@ def run(mode: str, generate: bool) -> dict:
     injection_resistance = []
     tp = fp = fn = 0
     answerable_total = 0
+    # Hard negatives are scored separately from the easy unanswerables. They fail for a
+    # different reason -- the topic is present and only the fact is missing -- and pooling
+    # them lets a collapse in one hide behind the other, which is the argument `by_type`
+    # already makes one level down.
+    hard_negative_refusals: list[float] = []
 
     for item in items:
         answer = answer_question(
@@ -355,24 +392,29 @@ def run(mode: str, generate: bool) -> dict:
 
         should_abstain = not item.answerable
         abstained = answer.status == "abstained"
+        if item.type == "hard_negative":
+            hard_negative_refusals.append(1.0 if abstained else 0.0)
         if not should_abstain:
             answerable_total += 1
-        if should_abstain and abstained:
-            tp += 1
-        elif should_abstain and not abstained:
-            fn += 1
-        elif not should_abstain and abstained:
+        elif item.type != "hard_negative":
+            tp += 1 if abstained else 0
+            fn += 0 if abstained else 1
+        if not should_abstain and abstained:
             fp += 1
 
         retrieval = _retrieval_metrics(item, answer.hits)
         context = _context_metrics(item, answer)
         if "hit_at_k" in retrieval:
             hit_at_k.append(retrieval["hit_at_k"])
+            hit_at_1.append(retrieval["hit_at_1"])
             mrr.append(retrieval["mrr"])
         if "context_recall" in context:
             context_recall.append(context["context_recall"])
         if "context_precision" in context:
             context_precision.append(context["context_precision"])
+        leak = _distractor_leak(item, answer) if item.answerable else None
+        if leak is not None:
+            distractor_leak.append(leak)
 
         record = {
             "id": item.id,
@@ -383,6 +425,8 @@ def run(mode: str, generate: bool) -> dict:
             **retrieval,
             **context,
         }
+        if leak is not None:
+            record["distractor_leak"] = leak
 
         if generate and answer.status == "answered":
             pass_rate = _must_contain_pass(item, answer)
@@ -414,13 +458,16 @@ def run(mode: str, generate: bool) -> dict:
         "num_items": len(items),
         "retrieval": {
             "hit_at_k": _mean(hit_at_k),
+            "hit_at_1": _mean(hit_at_1),
             "mrr": _mean(mrr),
             "context_recall": _mean(context_recall),
             "context_precision": _mean(context_precision),
+            "distractor_leak": _mean(distractor_leak),
         },
         "abstention": {
             "refusal_precision": refusal_precision,
             "refusal_recall": refusal_recall,
+            "hard_negative_refusal": _mean(hard_negative_refusals),
             "false_refusal_rate": false_refusal_rate,
         },
         "generation": {
@@ -446,12 +493,16 @@ def _by_type(items: list[GoldenItem], per_item: list[dict]) -> dict:
     failure mode a single mean hides, and the types are why the golden set has the shape it has."""
     by_type: dict[str, dict] = {}
     for item, record in zip(items, per_item, strict=True):
-        bucket = by_type.setdefault(item.type, {"n": 0, "correct_abstention": [], "hit_at_k": [], "must_contain": []})
+        bucket = by_type.setdefault(
+            item.type,
+            {"n": 0, "correct_abstention": [], "hit_at_k": [], "hit_at_1": [], "must_contain": []},
+        )
         bucket["n"] += 1
         abstained = record["status"] == "abstained"
         bucket["correct_abstention"].append(1.0 if abstained == (not item.answerable) else 0.0)
         if "hit_at_k" in record:
             bucket["hit_at_k"].append(record["hit_at_k"])
+            bucket["hit_at_1"].append(record["hit_at_1"])
         if "must_contain" in record:
             bucket["must_contain"].append(record["must_contain"])
     return {
@@ -459,6 +510,7 @@ def _by_type(items: list[GoldenItem], per_item: list[dict]) -> dict:
             "n": bucket["n"],
             "correct_abstention": _mean(bucket["correct_abstention"]),
             "hit_at_k": _mean(bucket["hit_at_k"]),
+            "hit_at_1": _mean(bucket["hit_at_1"]),
             "must_contain": _mean(bucket["must_contain"]),
         }
         for name, bucket in by_type.items()
@@ -522,9 +574,9 @@ def _gate_report(profile: dict, results: dict, outcomes: list[GateOutcome]) -> s
     for o in outcomes:
         value = f"{o.value:.3f}" if o.value is not None else "n/a"
         lines.append(f"| {o.metric} | {value} | {o.bound} | {o.limit:.3f} | {'pass' if o.passed else 'FAIL'} |")
-    lines += ["", "| Type | n | correct abstention | hit@k | must_contain |", "|---|---|---|---|---|"]
+    lines += ["", "| Type | n | correct abstention | hit@k | hit@1 | must_contain |", "|---|---|---|---|---|---|"]
     for name, bucket in sorted(results["by_type"].items()):
-        cells = [f"{bucket[k]:.3f}" if isinstance(bucket[k], float) else "n/a" for k in ("correct_abstention", "hit_at_k", "must_contain")]
+        cells = [f"{bucket[k]:.3f}" if isinstance(bucket[k], float) else "n/a" for k in ("correct_abstention", "hit_at_k", "hit_at_1", "must_contain")]
         lines.append(f"| {name} | {bucket['n']} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
