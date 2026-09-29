@@ -1,11 +1,16 @@
+import threading
+import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 
 from src.api import deps, router
 from src.auth.principal import Principal
-from src.core.config import SETTINGS
+from src.core.config import SETTINGS, replace
+from src.core.errors import GenerationError, QueryCancelled
 from src.ingestion.pipeline import doc_id_for
 
 PDF_BYTES = b"%PDF-1.4\n%mock pdf content\n"
@@ -167,7 +172,34 @@ def test_job_status_unknown_job_is_404(client, fake_queue):
 def test_ingest_rejects_oversize_file(client):
     huge = b"%PDF-1.4\n" + b"0" * (SETTINGS.ingestion.max_upload_mb * 1024 * 1024 + 1)
     resp = client.post("/ingest", files={"file": ("big.pdf", huge, "application/pdf")})
-    assert resp.status_code == 400
+    assert resp.status_code == 413
+    assert "MB upload limit" in resp.json()["detail"]
+
+
+def test_ingest_rejects_oversize_chunked_body(client):
+    # No content-length, so the body-cap middleware cannot see it: this is the path the
+    # streaming cap in upload.receive exists for.
+    boundary = "----sdatest"
+    crlf = "\r\n"
+    head = (
+        f"--{boundary}{crlf}"
+        f'Content-Disposition: form-data; name="file"; filename="big.pdf"{crlf}'
+        f"Content-Type: application/pdf{crlf}{crlf}"
+    ).encode()
+
+    def body():
+        yield head
+        yield b"%PDF-1.4\n"
+        for _ in range(SETTINGS.ingestion.max_upload_mb + 1):
+            yield b"0" * (1024 * 1024)
+        yield f"{crlf}--{boundary}--{crlf}".encode()
+
+    resp = client.post(
+        "/ingest",
+        content=body(),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    assert resp.status_code == 413
     assert "MB upload limit" in resp.json()["detail"]
 
 
@@ -212,6 +244,111 @@ def test_query_rejects_special_character_heavy_question(client):
     assert "special characters" in resp.json()["detail"]
 
 
+# --- POST /query: concurrency, timeout, cancellation ---
+
+
+@pytest.fixture
+def stub_deps(monkeypatch):
+    """answer_question is stubbed in these tests, so the handles it would be given are irrelevant
+    -- and building the real ones loads the models."""
+    for name in ("embedder", "vector_store", "llm_client", "keyword_index", "reranker"):
+        monkeypatch.setattr(deps, name, lambda: None)
+
+
+@pytest.fixture
+def slots_released():
+    """Every one of these tests must leave the semaphore exactly as it found it."""
+    yield
+    assert _free_slots() == SETTINGS.api.query_concurrency
+
+
+def _free_slots() -> int:
+    taken = []
+    while router._QUERY_SLOTS.acquire(blocking=False):
+        taken.append(1)
+    for _ in taken:
+        router._QUERY_SLOTS.release()
+    return len(taken)
+
+
+def _slow_answerer(seen: threading.Event, stopped: threading.Event):
+    """Stands in for the real answer: spins until the cancel flag flips, then unwinds the way
+    the answerer does."""
+
+    def fake(*args, cancel=None, **kwargs):
+        try:
+            for _ in range(500):
+                if cancel is not None and cancel():
+                    seen.set()
+                    raise QueryCancelled("generating")
+                time.sleep(0.01)
+            raise AssertionError("cancel never reached the answering thread")
+        finally:
+            stopped.set()
+
+    return fake
+
+
+def test_query_sheds_load_when_every_worker_slot_is_taken(client, slots_released):
+    held = [router._QUERY_SLOTS.acquire(blocking=False) for _ in range(SETTINGS.api.query_concurrency)]
+    assert all(held)
+    try:
+        resp = client.post("/query", json={"question": "What is the leave policy?", "doc_ids": []})
+    finally:
+        for _ in held:
+            router._QUERY_SLOTS.release()
+    assert resp.status_code == 503
+    assert resp.headers["Retry-After"] == "5"
+
+
+def test_query_releases_its_slot_when_the_stream_ends(client, monkeypatch, slots_released, stub_deps):
+    def boom(*args, **kwargs):
+        raise GenerationError("provider exploded")
+
+    monkeypatch.setattr(router, "answer_question", boom)
+    resp = client.post("/query", json={"question": "What is the leave policy?", "doc_ids": []})
+    assert resp.status_code == 200
+    assert "provider exploded" in resp.text
+
+
+def test_query_past_its_deadline_is_cancelled_not_left_running(client, monkeypatch, slots_released, stub_deps):
+    seen, stopped = threading.Event(), threading.Event()
+    monkeypatch.setattr(router, "answer_question", _slow_answerer(seen, stopped))
+    monkeypatch.setattr(
+        router, "SETTINGS", replace(SETTINGS, api=replace(SETTINGS.api, query_timeout_s=0))
+    )
+
+    resp = client.post("/query", json={"question": "What is the leave policy?", "doc_ids": []})
+
+    assert "took too long" in resp.text
+    # The point of the flag: the thread stops spending rather than running to completion.
+    assert seen.wait(5)
+    assert stopped.wait(5)
+
+
+def test_a_disconnected_client_cancels_the_answer(monkeypatch, slots_released, stub_deps):
+    """A disconnect reaches this generator as GeneratorExit, which is what `aclose` raises here:
+    Starlette closes the body stream when the socket goes."""
+    seen, stopped = threading.Event(), threading.Event()
+    monkeypatch.setattr(router, "answer_question", _slow_answerer(seen, stopped))
+    request = router.QueryRequest(question="What is the leave policy?", doc_ids=[])
+
+    async def drive():
+        assert router._QUERY_SLOTS.acquire(blocking=False)
+        stream = router._as_sse(router._answer_events(request, [], EDITOR))
+        # One frame, so the generator is suspended mid-stream exactly as it would be in flight.
+        assert await stream.__anext__() == router._KEEPALIVE
+        await stream.aclose()
+
+    monkeypatch.setattr(
+        router, "SETTINGS", replace(SETTINGS, api=replace(SETTINGS.api, stream_keepalive_s=0.0))
+    )
+    anyio.run(drive)
+
+    assert seen.wait(5)
+    assert stopped.wait(5)
+
+
 # --- GET /documents, DELETE /documents/{id} ---
 
 
@@ -223,15 +360,19 @@ def test_documents_list_and_delete_round_trip(client, fake_infra, monkeypatch):
             "pages": 2,
             "num_children": 3,
             "owner_id": EDITOR.user_id,
+            "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
         }
     ]
-    monkeypatch.setattr(router, "list_indexed", lambda tenant_id: docs)
+    monkeypatch.setattr(router, "list_indexed", lambda tenant_id, limit=None, after=None: docs)
     monkeypatch.setattr(router, "delete", lambda doc_id, actor: None)
     monkeypatch.setattr(router.audit, "record", lambda *a, **k: None)
 
     list_resp = client.get("/documents")
     assert list_resp.status_code == 200
-    assert list_resp.json() == docs
+    assert list_resp.json() == {
+        "items": [{k: v for k, v in docs[0].items() if k != "created_at"}],
+        "next_cursor": None,
+    }
 
     delete_resp = client.delete("/documents/d1")
     assert delete_resp.status_code == 200
