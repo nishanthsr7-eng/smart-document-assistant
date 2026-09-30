@@ -1,127 +1,142 @@
-import { useState, useCallback } from 'react'
+import { useCallback, useMemo, useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '../api'
+import { EVENTS, track } from '../observability'
+import { t } from '../i18n'
 
-export function useDocuments() {
-  const [docs, setDocs] = useState({}) // { docId: { filename, status, error, pages, chunks } }
+const KEY = ['documents']
+
+/**
+ * The document corpus, split along the line that matters: the list of indexed documents is
+ * server state and lives in the query cache, while the scope selection and the upload toasts are
+ * client state and live here.
+ *
+ * Before this split the list was a `useState` map that every mutation had to patch by hand, so
+ * "what the server has" and "what this tab last saw" could disagree with nothing to reconcile
+ * them. Now a mutation invalidates the query and the list is re-read.
+ */
+export function useDocuments(enabled) {
+  const queryClient = useQueryClient()
   const [scopedIds, setScopedIds] = useState(new Set())
-  const [uploads, setUploads] = useState([]) // [{ id, filename, progress, status, error }]
+  const [uploads, setUploads] = useState([])
+  // Failed uploads have no server row, so they are the one part of the list that is client
+  // state: shown until the user retries or reloads, so a rejection is not silent.
+  const [failures, setFailures] = useState({})
 
-  const loadFromServer = useCallback(async () => {
-    try {
-      const list = await api.getDocuments()
-      const map = {}
-      for (const d of [...list].reverse()) {
-        map[d.doc_id] = {
-          filename: d.filename,
-          status: 'ready',
-          error: null,
-          pages: d.pages,
-          chunks: d.num_children,
-        }
-      }
-      setDocs(map)
-    } catch {}
+  const documents = useQuery({ queryKey: KEY, queryFn: api.getDocuments, enabled })
+
+  const patchUpload = useCallback((uploadId, fields) => {
+    setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, ...fields } : u)))
   }, [])
 
-  const uploadFile = useCallback(async (file) => {
-    const uploadId = crypto.randomUUID()
-    setUploads((prev) => [
-      ...prev,
-      { id: uploadId, filename: file.name, progress: 0, status: 'uploading', stage: null, error: null },
-    ])
-    const patch = (fields) =>
-      setUploads((prev) => prev.map((u) => (u.id === uploadId ? { ...u, ...fields } : u)))
-    try {
-      const job = await api.uploadDocument(file, (p) => patch({ progress: p }))
-      patch({ status: 'indexing', progress: 85, stage: job.stage })
-      let report = job.report
-      if (!report) {
-        await api.streamJobProgress(job.job_id, {
-          onProgress: (stage) => patch({ stage, progress: 90 }),
-          onDone: (done) => {
-            report = done.report
-          },
-        })
-      }
-      setDocs((prev) => ({
-        [report.doc_id]: {
-          filename: report.filename,
-          status: 'ready',
-          error: null,
-          pages: report.pages,
-          chunks: report.num_children,
-        },
+  const dismissUpload = useCallback((uploadId, afterMs) => {
+    setTimeout(() => setUploads((prev) => prev.filter((u) => u.id !== uploadId)), afterMs)
+  }, [])
+
+  const upload = useMutation({
+    mutationFn: async (/** @type {File} */ file) => {
+      const uploadId = crypto.randomUUID()
+      setUploads((prev) => [
         ...prev,
-      }))
-      patch({ status: 'done', progress: 100, stage: null })
-      setTimeout(() => {
-        setUploads((prev) => prev.filter((u) => u.id !== uploadId))
-      }, 2500)
-    } catch (err) {
-      patch({ status: 'error', error: err.message })
-      setDocs((prev) => {
-        const n = { ...prev }
-        // Store error entry with a temp key
-        n['__err_' + uploadId] = {
-          filename: file.name,
-          status: 'failed',
-          error: err.message,
-          pages: null,
-          chunks: null,
+        { id: uploadId, filename: file.name, progress: 0, status: 'uploading', stage: null, error: null },
+      ])
+      try {
+        const job = await api.uploadDocument(file, (p) => patchUpload(uploadId, { progress: p }))
+        patchUpload(uploadId, { status: 'indexing', progress: 85, stage: job.stage })
+        let report = job.report
+        if (!report) {
+          await api.streamJobProgress(job.job_id, {
+            onProgress: (stage) => patchUpload(uploadId, { stage, progress: 90 }),
+            onReconnect: () => patchUpload(uploadId, { stage: t('upload.reconnecting') }),
+            onDone: (done) => {
+              report = done.report
+            },
+          })
         }
-        return n
-      })
-      setTimeout(() => {
-        setUploads((prev) => prev.filter((u) => u.id !== uploadId))
-      }, 5000)
-    }
-  }, [])
+        patchUpload(uploadId, { status: 'done', progress: 100, stage: null })
+        dismissUpload(uploadId, 2500)
+        track(EVENTS.DOCUMENT_UPLOADED, { pages: report?.pages, outcome: report?.outcome })
+        return report
+      } catch (err) {
+        patchUpload(uploadId, { status: 'error', error: err.message })
+        setFailures((prev) => ({
+          ...prev,
+          [`failed:${uploadId}`]: { filename: file.name, status: 'failed', error: err.message },
+        }))
+        dismissUpload(uploadId, 5000)
+        track(EVENTS.UPLOAD_FAILED, { status: err.status })
+        throw err
+      }
+    },
+    // Both paths: a failed ingest can still have replaced a document, and the list is cheap.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: KEY }),
+  })
 
-  const removeDoc = useCallback(async (docId) => {
-    try {
-      await api.deleteDocument(docId)
-    } catch {}
-    setDocs((prev) => {
-      const n = { ...prev }
-      delete n[docId]
-      return n
-    })
-    setScopedIds((prev) => {
-      const n = new Set(prev)
-      n.delete(docId)
-      return n
-    })
-  }, [])
+  const remove = useMutation({
+    mutationFn: api.deleteDocument,
+    onSuccess: (_, docId) => {
+      setScopedIds((prev) => {
+        const next = new Set(prev)
+        next.delete(docId)
+        return next
+      })
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: KEY }),
+  })
+
+  const removeDoc = useCallback(
+    (docId) => {
+      if (docId.startsWith('failed:')) {
+        setFailures((prev) => {
+          const next = { ...prev }
+          delete next[docId]
+          return next
+        })
+        return
+      }
+      remove.mutate(docId)
+    },
+    [remove],
+  )
+
+  // The shape the drawer and the composer read: newest first, failures alongside the real rows.
+  const docs = useMemo(() => {
+    const map = {}
+    for (const doc of [...(documents.data || [])].reverse()) {
+      map[doc.doc_id] = {
+        filename: doc.filename,
+        status: 'ready',
+        error: null,
+        pages: doc.pages,
+        chunks: doc.num_children,
+      }
+    }
+    return { ...failures, ...map }
+  }, [documents.data, failures])
+
+  const readyIds = useMemo(
+    () => Object.entries(docs).filter(([, e]) => e.status === 'ready').map(([id]) => id),
+    [docs],
+  )
+  const effectiveIds = scopedIds.size > 0 ? readyIds.filter((id) => scopedIds.has(id)) : readyIds
 
   const toggleScope = useCallback((docId) => {
     setScopedIds((prev) => {
-      const n = new Set(prev)
-      if (n.has(docId)) n.delete(docId)
-      else n.add(docId)
-      return n
+      const next = new Set(prev)
+      if (next.has(docId)) next.delete(docId)
+      else next.add(docId)
+      return next
     })
   }, [])
 
   const setScope = useCallback((docId, on) => {
     setScopedIds((prev) => {
-      const n = new Set(prev)
-      if (on) n.add(docId)
-      else n.delete(docId)
-      return n
+      const next = new Set(prev)
+      if (on) next.add(docId)
+      else next.delete(docId)
+      return next
     })
   }, [])
-
-  const selectAll = useCallback((readyIds) => {
-    setScopedIds(new Set(readyIds))
-  }, [])
-
-  const clearScope = useCallback(() => setScopedIds(new Set()), [])
-
-  const readyDocs = Object.entries(docs).filter(([, e]) => e.status === 'ready')
-  const readyIds = readyDocs.map(([id]) => id)
-  const effectiveIds = scopedIds.size > 0
-    ? readyIds.filter((id) => scopedIds.has(id))
-    : readyIds
 
   return {
     docs,
@@ -129,14 +144,14 @@ export function useDocuments() {
     uploads,
     readyIds,
     effectiveIds,
+    loaded: documents.isSuccess,
     hasReady: readyIds.length > 0,
     allSelected: readyIds.length > 0 && readyIds.every((id) => scopedIds.has(id)),
-    loadFromServer,
-    uploadFile,
+    uploadFile: (file) => upload.mutate(file),
     removeDoc,
     toggleScope,
     setScope,
-    selectAll,
-    clearScope,
+    selectAll: useCallback((ids) => setScopedIds(new Set(ids)), []),
+    clearScope: useCallback(() => setScopedIds(new Set()), []),
   }
 }

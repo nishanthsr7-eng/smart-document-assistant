@@ -1,8 +1,10 @@
+import { t } from '../i18n'
+
 const TIPS = [
-  { text: 'Attach a PDF or TXT file to begin', action: 'attach' },
-  { text: 'Ask a question — answers cite the exact source', action: 'focus' },
-  { text: 'Switch retrieval mode (Hybrid + Rerank) for different tradeoffs', action: 'mode' },
-  { text: 'Every answer includes citations and a confidence score', action: 'focus' },
+  { key: 'tips.attach', action: 'attach' },
+  { key: 'tips.ask', action: 'focus' },
+  { key: 'tips.mode', action: 'mode' },
+  { key: 'tips.citations', action: 'focus' },
 ]
 
 export default function SuggestionList({ onAttach, onFocusInput, onOpenMode }) {
@@ -14,15 +16,15 @@ export default function SuggestionList({ onAttach, onFocusInput, onOpenMode }) {
 
   return (
     <div className="suggestion-list">
-      {TIPS.map((tip, i) => (
+      {TIPS.map((tip) => (
         <button
           type="button"
           className="suggestion-row"
-          key={i}
+          key={tip.key}
           onClick={handlers[tip.action]}
         >
-          <span className="suggestion-arrow">&#8618;</span>
-          <span className="suggestion-text">{tip.text}</span>
+          <span className="suggestion-arrow" aria-hidden="true">&#8618;</span>
+          <span className="suggestion-text">{t(tip.key)}</span>
         </button>
       ))}
     </div>

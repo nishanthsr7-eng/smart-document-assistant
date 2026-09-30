@@ -1,3 +1,5 @@
+import { t } from '../i18n'
+
 function Sentences({ sentences, onCite }) {
   if (!sentences || sentences.length === 0) return null
   return (
@@ -15,16 +17,24 @@ function Sentences({ sentences, onCite }) {
           <div key={i}>
             <span className={cls}>
               {s.text}
-              {s.cites && s.cites.map((id) => (
-                <button key={id} className="cite-chip" onClick={() => onCite(id)}>{id}</button>
-              ))}
+              {s.cites &&
+                s.cites.map((id) => (
+                  <button
+                    key={id}
+                    className="cite-chip"
+                    onClick={() => onCite(id)}
+                    aria-label={t('answer.citation', { id })}
+                  >
+                    {id}
+                  </button>
+                ))}
               {s.citation_status === 'unsupported' && (
-                <span className="status-label">unsupported</span>
+                <span className="status-label">{t('answer.unsupported')}</span>
               )}
             </span>
             {s.citation_status === 'unsupported' && s.cites?.length > 0 && (
               <div className="answer-sentence-note">
-                not found in [{s.cites.join(', ')}]
+                {t('answer.notFoundIn', { ids: s.cites.join(', ') })}
               </div>
             )}
           </div>
@@ -35,21 +45,22 @@ function Sentences({ sentences, onCite }) {
 }
 
 function AbstainedView({ answer }) {
-  const reason = answer.abstain_reason || "I couldn't find that in the selected documents."
+  const reason = answer.abstain_reason || t('answer.abstainedDefault')
   const nm = answer.near_miss
+  const pages = nm && nm.page_start !== nm.page_end ? `${nm.page_start}–${nm.page_end}` : nm?.page_start
   return (
     <>
       <div className="abstained-note">{reason}</div>
       {nm && (
         <div className="abstained-note" style={{ marginTop: '0.5rem' }}>
           <div className="source-head">
-            Closest match: {nm.filename} p.{nm.page_start}
-            {nm.page_start !== nm.page_end ? `–${nm.page_end}` : ''}
-            {nm.section_path?.length > 0 ? ` · ${nm.section_path.join(' > ')}` : ''}
-            {' '}(score {nm.score?.toFixed(2)})
+            {t('answer.closestMatch', { filename: nm.filename, pages })}
+            {nm.section_path?.length > 0 ? ` · ${nm.section_path.join(' > ')}` : ''}{' '}
+            {t('answer.score', { score: nm.score?.toFixed(2) })}
           </div>
           <div className="source-text">
-            {nm.text?.slice(0, 400)}{nm.text?.length > 400 ? '…' : ''}
+            {nm.text?.slice(0, 400)}
+            {nm.text?.length > 400 ? '…' : ''}
           </div>
         </div>
       )}
@@ -62,10 +73,8 @@ export default function AnswerCard({ answer, onCite }) {
     return <AbstainedView answer={answer} />
   }
   if (answer.status !== 'answered') {
-    return <p className="message-text">No answer was generated.</p>
+    return <p className="message-text">{t('answer.none')}</p>
   }
 
-  return (
-    <Sentences sentences={answer.sentences} onCite={onCite} />
-  )
+  return <Sentences sentences={answer.sentences} onCite={onCite} />
 }

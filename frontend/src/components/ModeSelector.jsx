@@ -1,22 +1,32 @@
-import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react'
+import React, { useEffect, useId, useImperativeHandle, useRef, useState, forwardRef } from 'react'
+import { t } from '../i18n'
 
-const LABELS = {
-  dense: 'Dense',
-  hybrid: 'Hybrid',
-  hybrid_rerank: 'Hybrid + Rerank',
-}
+const label = (mode) => t(`mode.${mode}`)
 
 function ChevronIcon() {
   return (
-    <svg viewBox="0 -960 960 960" fill="currentColor">
+    <svg viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true" focusable="false">
       <path d="M480-345 240-585l56-56 184 184 184-184 56 56-240 240Z" />
     </svg>
   )
 }
 
-const ModeSelector = forwardRef(function ModeSelector({ modes, value, onChange, disabled }, ref) {
+/**
+ * @typedef {object} ModeSelectorProps
+ * @property {string[]} modes
+ * @property {string} value
+ * @property {(mode: string) => void} onChange
+ * @property {boolean} disabled
+ */
+
+/** @type {React.ForwardRefExoticComponent<ModeSelectorProps & React.RefAttributes<any>>} */
+const ModeSelector = forwardRef(function ModeSelector(
+  /** @type {ModeSelectorProps} */ { modes, value, onChange, disabled },
+  ref,
+) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef(null)
+  const menuId = useId()
 
   useImperativeHandle(ref, () => ({
     open: () => setOpen(true),
@@ -45,22 +55,27 @@ const ModeSelector = forwardRef(function ModeSelector({ modes, value, onChange, 
         className="mode-select-btn"
         disabled={disabled}
         onClick={() => setOpen((o) => !o)}
-        title="Retrieval mode"
+        aria-label={t('mode.label')}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
       >
-        {LABELS[value] || value}
+        {label(value)}
         <ChevronIcon />
       </button>
 
       {open && (
-        <div className="mode-select-menu">
+        <div className="mode-select-menu" id={menuId} role="menu">
           {(modes || []).map((m) => (
             <button
               key={m}
               type="button"
+              role="menuitemradio"
+              aria-checked={m === value}
               className={`mode-select-option${m === value ? ' active' : ''}`}
               onClick={() => { onChange(m); setOpen(false) }}
             >
-              {LABELS[m] || m}
+              {label(m)}
             </button>
           ))}
         </div>

@@ -1,23 +1,32 @@
+import { t } from '../i18n'
+
 export default function HistoryPanel({ messages, onClose }) {
   const questions = messages.filter((m) => m.role === 'user')
 
   return (
-    <div className="icon-popover-panel icon-popover-panel-right">
+    <div
+      className="icon-popover-panel icon-popover-panel-right"
+      role="dialog"
+      aria-label={t('history.panel')}
+      tabIndex={-1}
+    >
       <div className="drawer-header">
-        <span className="drawer-title">History</span>
-        <button className="drawer-close" onClick={onClose} aria-label="Close">×</button>
+        <span className="drawer-title">{t('history.title')}</span>
+        <button className="drawer-close" onClick={onClose} aria-label={t('common.close')}>
+          ×
+        </button>
       </div>
 
       {questions.length === 0 ? (
-        <div className="history-empty">No questions yet this session</div>
+        <div className="history-empty">{t('history.empty')}</div>
       ) : (
-        <div className="history-list">
+        <ul className="history-list">
           {questions.map((m, i) => (
-            <div className="history-row" key={i}>
+            <li className="history-row" key={i}>
               {m.content}
-            </div>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
     </div>
   )

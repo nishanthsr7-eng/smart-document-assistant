@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api'
+import { setUserContext } from '../observability'
 
 export function useAuth() {
   const [user, setUser] = useState(null)
@@ -9,12 +10,19 @@ export function useAuth() {
   // A stored token is only trusted once /auth/me has accepted it: it may have expired, or the
   // signing key may have rotated, while this browser was away.
   useEffect(() => {
-    api.onSessionExpired(() => setUser(null))
+    api.onSessionExpired(() => {
+      setUser(null)
+      setUserContext(null)
+    })
     if (!api.getToken()) return
     let cancelled = false
     api
       .getMe()
-      .then((me) => !cancelled && setUser(me))
+      .then((me) => {
+        if (cancelled) return
+        setUser(me)
+        setUserContext(me)
+      })
       .catch(() => api.setToken(null))
       .finally(() => !cancelled && setChecking(false))
     return () => {
@@ -25,6 +33,7 @@ export function useAuth() {
   const accept = useCallback((session) => {
     api.setToken(session.access_token)
     setUser(session.user)
+    setUserContext(session.user)
     setError(null)
   }, [])
 
@@ -55,6 +64,7 @@ export function useAuth() {
   const signOut = useCallback(() => {
     api.setToken(null)
     setUser(null)
+    setUserContext(null)
     setError(null)
   }, [])
 

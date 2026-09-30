@@ -1,4 +1,7 @@
 import { useState } from 'react'
+import { t } from '../i18n'
+
+const MIN_PASSWORD_CHARS = 10
 
 export default function AuthScreen({ error, onSignIn, onSignUp }) {
   const [signingUp, setSigningUp] = useState(false)
@@ -17,19 +20,17 @@ export default function AuthScreen({ error, onSignIn, onSignUp }) {
 
   return (
     <div className="auth-screen">
-      <form className="auth-card" onSubmit={submit}>
-        <h1 className="auth-title">Smart Document Assistant</h1>
-        <p className="auth-sub">
-          {signingUp ? 'Create a workspace' : 'Sign in to your workspace'}
-        </p>
+      <form className="auth-card" onSubmit={submit} aria-describedby="auth-note">
+        <h1 className="auth-title">{t('app.name')}</h1>
+        <p className="auth-sub">{signingUp ? t('auth.signUpTitle') : t('auth.signInTitle')}</p>
 
         {signingUp && (
           <label className="auth-field">
-            <span>Organization</span>
+            <span>{t('auth.organization')}</span>
             <input
               value={tenantName}
               onChange={(e) => setTenantName(e.target.value)}
-              placeholder="Acme Inc"
+              placeholder={t('auth.organizationPlaceholder')}
               minLength={2}
               required
               autoComplete="organization"
@@ -38,47 +39,47 @@ export default function AuthScreen({ error, onSignIn, onSignUp }) {
         )}
 
         <label className="auth-field">
-          <span>Email</span>
+          <span>{t('auth.email')}</span>
           <input
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@acme.com"
+            placeholder={t('auth.emailPlaceholder')}
             required
             autoComplete="username"
           />
         </label>
 
         <label className="auth-field">
-          <span>Password</span>
+          <span>{t('auth.password')}</span>
           <input
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder={signingUp ? 'At least 10 characters' : ''}
-            minLength={signingUp ? 10 : 1}
+            placeholder={signingUp ? t('auth.passwordHint', { min: MIN_PASSWORD_CHARS }) : ''}
+            minLength={signingUp ? MIN_PASSWORD_CHARS : 1}
             required
             autoComplete={signingUp ? 'new-password' : 'current-password'}
           />
         </label>
 
-        {error && <p className="auth-error">{error}</p>}
+        {/* A failed sign-in has to reach a screen reader, and it appears without focus moving. */}
+        {error && (
+          <p className="auth-error" role="alert">
+            {error}
+          </p>
+        )}
 
         <button className="auth-submit" type="submit" disabled={busy}>
-          {busy ? 'Working…' : signingUp ? 'Create workspace' : 'Sign in'}
+          {busy ? t('auth.working') : signingUp ? t('auth.signUp') : t('auth.signIn')}
         </button>
 
-        <button
-          className="auth-toggle"
-          type="button"
-          onClick={() => setSigningUp((s) => !s)}
-        >
-          {signingUp ? 'I already have an account' : 'Create a new workspace'}
+        <button className="auth-toggle" type="button" onClick={() => setSigningUp((s) => !s)}>
+          {signingUp ? t('auth.haveAccount') : t('auth.needAccount')}
         </button>
 
-        <p className="auth-note">
-          Documents are scoped to your workspace. The first user of a new workspace is its admin
-          and can invite others.
+        <p className="auth-note" id="auth-note">
+          {t('auth.note')}
         </p>
       </form>
     </div>
