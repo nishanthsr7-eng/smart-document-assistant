@@ -4,3 +4,7 @@ ruff==0.15.4
 mypy==1.20.0
 pytest-cov==7.0.0
 pip-audit==2.9.0
+# Property-based tests for the parsers and the text utilities, and a schema fuzz over the
+# OpenAPI document so a new endpoint is exercised without anyone writing a case for it.
+hypothesis==6.168.3
+schemathesis==4.28.0

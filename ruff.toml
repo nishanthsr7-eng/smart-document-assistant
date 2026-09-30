@@ -8,4 +8,6 @@ select = ["E", "F", "I", "B", "C4", "SIM", "T20"]
 ignore = ["B008", "E501"]
 
 [lint.per-file-ignores]
+# Operator CLIs: their output is the interface, so printing is the point.
 "evaluation/*" = ["T20"]
+"deploy/backup/*" = ["T20"]

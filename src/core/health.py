@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from src.api import deps
 from src.core.config import SETTINGS
+from src.generation import client as llm
 from src.retrieval import tei
 from src.storage import objects
 from src.storage.db import engine
@@ -17,8 +18,38 @@ from src.storage.redis_client import client
 _PROBE_TIMEOUT_S = 5.0
 _MEMO_TTL_S = 10.0
 
+# Reported while draining: the backends are almost certainly fine, and saying so would invite a
+# balancer to keep sending work to a process that is on its way out.
+_UNKNOWN = {
+    "postgres": "draining",
+    "redis": "draining",
+    "object_store": "draining",
+    "embedder": "draining",
+    "reranker": "draining",
+    "llm": "draining",
+}
+
 _lock = threading.Lock()
 _memo: tuple[float, dict[str, str]] = (0.0, {})
+_draining = threading.Event()
+
+
+def start_draining() -> None:
+    """Fail readiness from now on, while still serving what is in flight.
+
+    Shutdown order matters for a streaming API. A replica that stops accepting connections
+    while the load balancer still believes it is healthy drops the answers already streaming
+    through it; one that reports unready first is taken out of rotation, finishes them, and
+    then exits. This is the flag that separates the two, and `DRAIN_DELAY_S` is how long the
+    process then waits for the balancer to notice.
+    """
+    _draining.set()
+    with _lock:
+        globals()["_memo"] = (0.0, {})
+
+
+def draining() -> bool:
+    return _draining.is_set()
 
 
 def check_health() -> dict[str, str]:
@@ -27,6 +58,8 @@ def check_health() -> dict[str, str]:
     Never runs an embedding pass, never calls the generation provider, never scans a collection.
     The result is memoized so a tight probe interval cannot amplify into backend load.
     """
+    if _draining.is_set():
+        return {**_UNKNOWN, "status": "draining", "provider": ",".join(llm.chain())}
     with _lock:
         expires, cached = _memo
         if time.monotonic() < expires:
@@ -50,7 +83,9 @@ def check_health() -> dict[str, str]:
         "reranker": "tei" if SETTINGS.models.tei_rerank_url else _loaded(deps.reranker),
         "llm": _loaded(deps.llm_client),
         "status": "ok" if all(v == "ok" for v in backends.values()) else "degraded",
-        "provider": SETTINGS.models.llm_provider,
+        # The whole chain, in order: which one is serving is a per-request outcome, and
+        # sda_llm_breaker_open is where an outage shows up.
+        "provider": ",".join(llm.chain()),
     }
 
     with _lock:
