@@ -100,7 +100,12 @@ def test_token_with_an_unknown_role_is_rejected():
     ],
 )
 def test_role_ranking(role, required, allowed):
-    assert Principal("u", "t", "e@f.test", role).can(required) is allowed
+    assert Principal("u", "t", "admin@acme.test", role).can(required) is allowed
+
+
+def test_admin_is_reserved_to_the_configured_addresses():
+    assert Principal("u", "t", "stranger@acme.test", "admin").can("admin") is False
+    assert Principal("u", "t", "stranger@acme.test", "admin").can("editor") is True
 
 
 # --- registration and login ---
@@ -110,6 +115,16 @@ def test_register_makes_the_first_user_an_admin(clean_state):
     principal = service.register_tenant("Acme", "Admin@Acme.test", "acme-password-1")
     assert principal.role == "admin"
     assert principal.email == "admin@acme.test"
+
+
+def test_register_gives_an_unreserved_signup_the_default_role(clean_state):
+    principal = service.register_tenant("Initech", "stranger@initech.test", "initech-password-1")
+    assert principal.role == "editor"
+
+
+def test_admin_role_cannot_be_granted_to_an_unreserved_address(tenants):
+    with pytest.raises(PermissionDenied):
+        service.create_user(tenants.a, "stranger@acme.test", "stranger-password-1", "admin")
 
 
 def test_duplicate_email_is_refused(clean_state):

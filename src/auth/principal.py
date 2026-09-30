@@ -15,4 +15,8 @@ class Principal:
     role: str
 
     def can(self, required: str) -> bool:
+        # Admin is checked against the configured addresses, not only against the claim: a row
+        # or a token minted before the reservation must not carry admin either.
+        if required == "admin" and not SETTINGS.auth.is_admin_email(self.email):
+            return False
         return _RANK[self.role] >= _RANK[required]

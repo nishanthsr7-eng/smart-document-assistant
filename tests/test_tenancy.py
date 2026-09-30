@@ -158,8 +158,8 @@ def test_chunks_carry_the_owning_tenant(tenants):
 
 def test_answer_cache_key_is_tenant_scoped(tenants):
     """Two tenants asking the same question of same-named documents must not share an answer."""
-    key_a = answerer._cache_key(tenants.a.tenant_id, "What is the bonus pool?", ["d"], "hybrid", True)
-    key_b = answerer._cache_key(tenants.b.tenant_id, "What is the bonus pool?", ["d"], "hybrid", True)
+    key_a = answerer._cache_key(tenants.a.tenant_id, "What is the bonus pool?", ["d"], "hybrid", True, None)
+    key_b = answerer._cache_key(tenants.b.tenant_id, "What is the bonus pool?", ["d"], "hybrid", True, None)
     assert key_a != key_b
 
 

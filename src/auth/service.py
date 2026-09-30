@@ -13,11 +13,16 @@ from src.storage.models import Tenant, User
 
 
 def register_tenant(tenant_name: str, email: str, password: str) -> Principal:
-    """Sign up: creates the tenant and its first user as admin. Further users need that admin."""
+    """Sign up: creates the tenant and its first user. Admin is reserved for the configured
+    addresses, so an ordinary signup gets `signup_role`, not the run of the instance."""
     _validate_password(password)
     tenant_id = str(uuid.uuid4())
+    address = _normalize(email)
     principal = Principal(
-        user_id=str(uuid.uuid4()), tenant_id=tenant_id, email=_normalize(email), role="admin"
+        user_id=str(uuid.uuid4()),
+        tenant_id=tenant_id,
+        email=address,
+        role="admin" if SETTINGS.auth.is_admin_email(address) else SETTINGS.auth.signup_role,
     )
     try:
         with session() as sess:
@@ -34,11 +39,14 @@ def create_user(actor: Principal, email: str, password: str, role: str) -> Princ
         raise PermissionDenied("Only an admin can create users.")
     if role not in SETTINGS.auth.roles:
         raise PermissionDenied(f"Unknown role '{role}'.")
+    address = _normalize(email)
+    if role == "admin" and not SETTINGS.auth.is_admin_email(address):
+        raise PermissionDenied("The admin role is reserved and cannot be granted.")
     _validate_password(password)
     principal = Principal(
         user_id=str(uuid.uuid4()),
         tenant_id=actor.tenant_id,
-        email=_normalize(email),
+        email=address,
         role=role,
     )
     try:

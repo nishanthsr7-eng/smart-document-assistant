@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -5,6 +6,10 @@ from types import SimpleNamespace
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# The admin role is reserved to ADMIN_EMAILS; the fixtures below sign up as admins, so the
+# reservation has to name them before src.core.config is first imported.
+os.environ.setdefault("ADMIN_EMAILS", "admin@acme.test,admin@globex.test")
 
 
 def _stack_available() -> bool:
@@ -49,6 +54,22 @@ def tenants(clean_state):
         a=service.register_tenant("Acme", "admin@acme.test", "acme-password-1"),
         b=service.register_tenant("Globex", "admin@globex.test", "globex-password-1"),
     )
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limits():
+    """Rate-limit buckets are tenant-keyed shared state that outlives a test. Without this the
+    order the suite runs in would decide which requests come back 429."""
+    import redis
+
+    from src.storage.redis_client import client
+
+    try:
+        keys = client().keys("ratelimit:*") + client().keys("budget:*")
+    except redis.RedisError:
+        return
+    if keys:
+        client().delete(*keys)
 
 
 @pytest.fixture

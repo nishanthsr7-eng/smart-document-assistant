@@ -1,6 +1,5 @@
 import json
 import pickle
-from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +11,7 @@ from sqlalchemy.exc import OperationalError
 
 from src.api import router
 from src.core import llm_traces, logs, metrics, observability, otel
-from src.core.config import SETTINGS
+from src.core.config import SETTINGS, replace
 from src.core.tracing import Trace
 
 
