@@ -1,0 +1,37 @@
+# Findings the SBOM scan reports as fixed upstream but that cannot be fixed from here. The gate
+# in .github/workflows/supply-chain.yml blocks on fixable highs on purpose; these have a fix in
+# some version that this image cannot reach, so without the entries below the gate can never be
+# satisfied. Revisit whenever the runtime moves off Python 3.10 or opencv ships a newer ffmpeg.
+#
+# No package type is given: scanning the image reports these as `binary`, scanning the SPDX
+# document reports the same findings as `UnknownPackage`, and CI scans the document.
+ignore:
+  # The interpreter. Both are fixed in 3.11.16 / 3.12.14 / 3.13.14 and later only -- there is no
+  # 3.10 patch, and 3.10 is the version this project pins.
+  - vulnerability: CVE-2026-7210
+    package:
+      name: python
+  - vulnerability: CVE-2026-82049
+    package:
+      name: python
+  # Fixed in 3.13.11 / 3.14.1 / 3.15.0 only; same story as above.
+  - vulnerability: CVE-2025-13836
+    package:
+      name: python
+  # ffmpeg shared objects vendored inside the opencv-python wheel, which docling pulls in. The
+  # fix is ffmpeg 8.1.2; shipping it means opencv rebuilding its wheel, not a change in this repo.
+  - vulnerability: CVE-2026-8461
+    package:
+      name: ffmpeg
+  - vulnerability: CVE-2026-75146
+    package:
+      name: ffmpeg
+  - vulnerability: CVE-2026-75142
+    package:
+      name: ffmpeg
+  - vulnerability: CVE-2026-70632
+    package:
+      name: ffmpeg
+  - vulnerability: CVE-2026-70628
+    package:
+      name: ffmpeg

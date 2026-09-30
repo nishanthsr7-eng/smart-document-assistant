@@ -43,6 +43,9 @@ jobs:
       S3_SECRET_KEY: minioadmin
       JWT_SECRET: ci-only-not-a-real-secret
       LLM_PROVIDER: ollama
+      # Without it the operator endpoints answer 503 by design, which the schema fuzz reports
+      # as a server error.
+      OPERATOR_TOKEN: ci-only-not-a-real-token
     steps:
       - uses: actions/checkout@v5
 
@@ -54,7 +57,7 @@ jobs:
             chrislusf/seaweedfs:latest \
             server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
           for _ in $(seq 1 40); do
-            curl -sf http://127.0.0.1:9002/ >/dev/null && exit 0
+            curl -fsS -o /dev/null http://127.0.0.1:9002/status && exit 0
             sleep 2
           done
           docker logs objectstore
@@ -81,7 +84,9 @@ jobs:
       - run: ruff check .
       - run: mypy src
       - run: alembic upgrade head
-      - run: pytest -q --cov=src --cov-report=term-missing --cov-fail-under=65
+      - run: pytest -q --cov=src --cov-report=term-missing --cov-fail-under=75
+      # Its own process: see the note in pytest.ini.
+      - run: pytest -q tests/test_openapi_contract.py
 
   # Quality gate. Runs the golden set against the retrieval profile in evaluation/thresholds.yaml
   # and fails the PR on a breach. No API key exists here, so generation is not exercised
@@ -125,7 +130,7 @@ jobs:
             chrislusf/seaweedfs:latest \
             server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
           for _ in $(seq 1 40); do
-            curl -sf http://127.0.0.1:9002/ >/dev/null && exit 0
+            curl -fsS -o /dev/null http://127.0.0.1:9002/status && exit 0
             sleep 2
           done
           docker logs objectstore
@@ -173,6 +178,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - run: npm run lint
+      # checkJs against the @types/react the app already depends on: a misspelled prop or a
+      # call with the wrong arity fails here rather than in someone's browser.
+      - run: npm run typecheck
+      - run: npm test
+      # `build` runs the bundle-size check, so a dependency that doubles the first load fails
+      # the PR that added it instead of being noticed a release later.
       - run: npm run build
 
   audit:
@@ -185,7 +196,16 @@ jobs:
       - run: pip install pip-audit==2.9.0
       # torch resolves from the CPU index, which pip-audit does not query.
       - run: pip-audit -r requirements.txt --index-url https://pypi.org/simple --strict
-      - uses: aquasecurity/trivy-action@0.33.1
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # The frontend is pinned to exact versions and installed from the lockfile, so this audits
+      # the tree that actually ships rather than whatever the ranges resolve to today.
+      - run: npm ci --prefix frontend
+      - run: npm audit --prefix frontend --audit-level=high
+      - uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -223,8 +243,10 @@ jobs:
           load: true
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          # Optional: an anonymous weight pull from a shared runner address is rate limited.
+          secrets: hf_token=${{ secrets.HF_TOKEN }}
       - name: Scan ${{ matrix.name }} image
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: sda-${{ matrix.name }}:${{ github.sha }}
           severity: HIGH,CRITICAL

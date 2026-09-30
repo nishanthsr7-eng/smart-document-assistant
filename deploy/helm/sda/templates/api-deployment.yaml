@@ -54,8 +54,20 @@ spec:
             timeoutSeconds: 3
           readinessProbe:
             httpGet: {path: /health, port: http}
-            periodSeconds: 10
-            timeoutSeconds: 8
+            # Tighter than the liveness probe on purpose: this is how fast the service stops
+            # routing to a replica that has begun draining, and the preStop sleep below has to
+            # cover period x failureThreshold.
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              exec:
+                # Endpoint removal and SIGTERM are dispatched together, and SIGTERM usually
+                # wins. This sleep runs before SIGTERM and gives endpoint propagation the head
+                # start, so the last requests routed here are answered rather than refused.
+                # The API reports unready for the whole of it -- see _drain_on_signal.
+                command: ["sleep", {{ .Values.api.preStopDrainSeconds | quote }}]
           resources: {{- toYaml .Values.api.resources | nindent 12 }}
           volumeMounts:
             - name: tmp

@@ -2,6 +2,8 @@
 
 A RAG (Retrieval-Augmented Generation) application for uploading PDF and TXT documents, asking questions, and getting cited answers with calibrated confidence scores. Embeddings, vector store, and reranking run locally; generation defaults to a free-tier cloud API (see **Provider Choice** below), with a fully-offline Ollama fallback.
 
+![The assistant after sign-in: the question composer, the attach control, and the retrieval-mode selector](docs/screenshots/app.webp)
+
 ## Problem Understanding
 
 The task is to build a document Q&A system that:
@@ -81,23 +83,41 @@ frontend/                Presentation layer (React SPA)
     components/          UI components
 
 src/                     Business logic (UI-agnostic, testable)
-  api/                   FastAPI REST layer
+  api/                   FastAPI REST layer; problem+json, idempotency, cursors, ETags, webhooks
   auth/                  Principal, password hashing, JWT, user service, audit log
-  core/                  Config, errors, tracing, metrics, structured logs, OTel setup
-  ingestion/             Parse -> chunk -> index pipeline
-  retrieval/             Embedder, pgvector store, tsvector lexical index, hybrid search, reranker
-  generation/            LLM client, prompt templates, answer orchestration
-  trust/                 Abstention gate, citation validation, confidence scoring
-  storage/               Postgres engine/session, ORM models, object store, Redis cache and locks
+  core/                  Config and flags, threshold artifacts, cache, limits, redaction,
+                         errors, health, observability (traces, metrics, logs)
+  ingestion/             Streaming upload -> parse -> chunk -> index pipeline, worker, reindex
+  retrieval/             Embedder, pgvector store, tsvector lexical index, hybrid search,
+                         reranker, TEI transport, query sanitisation and decomposition
+  generation/            LLM client with failover, prompt templates, answer orchestration
+  trust/                 Abstention gate, citation validation, output scanner, confidence
+  storage/               Postgres engine/session, ORM models, object store, Redis, index
+                         alias, right-to-erasure
 
+config/thresholds/       Versioned decision thresholds, selected by THRESHOLDS_VERSION
 migrations/              Alembic schema migrations
-docker-compose.yml       Postgres (pgvector), Redis, object store; app and obs profiles
+docker-compose.yml       Postgres (pgvector), Redis, object store; app, tei and obs profiles
 deploy/observability/    Prometheus scrape config, Grafana datasources and dashboard
 deploy/helm/sda/         Helm chart (API, worker, frontend, migrations, ServiceMonitor, alerts)
+deploy/backup/           Backup and restore scripts, drill corpus seeder
 
-evaluation/              Golden set (33 items) + metrics runner
+docs/                    Architecture, SLOs, runbooks, on-call, twelve-factor review
+evaluation/              Golden set (33 items), metrics runner, reranker calibration
+tests/                   Backend suite, plus tests/load/ (k6 profile)
 data/sample_docs/        Three real public-domain U.S. government documents
 ```
+
+### Documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | As-built engineering reference: topology, data model, request paths, decisions |
+| [docs/slos.md](docs/slos.md) | Service level objectives, error budgets, and what each one is measured from |
+| [docs/runbooks.md](docs/runbooks.md) | Per-alert diagnosis and remediation |
+| [docs/oncall.md](docs/oncall.md) | Severity ladder, first moves, and what not to do at 3am |
+| [docs/twelve-factor.md](docs/twelve-factor.md) | Twelve-factor review, including the one deliberate deviation |
+| [deploy/backup/README.md](deploy/backup/README.md) | Backup scope, RPO/RTO, restore procedure, weekly drill |
 
 ## Technology Choices
 
@@ -246,7 +266,7 @@ helm upgrade --install sda deploy/helm/sda   --set ingress.host=sda.example.com 
   model weights through a parse. Separate deployments, resource envelopes, HPAs and PDBs.
 - `alembic upgrade head` runs as a `pre-install,pre-upgrade` hook Job, so the schema is never
   behind the code that reads it.
-- Probes match what item 7 of the gap analysis rebuilt: `/livez` for liveness (static),
+- Probes are split by purpose: `/livez` for liveness (static),
   `/health` for readiness (backend pings, memoized, no model construction and no provider call).
 - The worker's grace period is 16 minutes -- long enough that a 200-page parse is not torn out
   from under the job -- and the API's is 2 minutes so in-flight SSE answers drain.
@@ -259,11 +279,20 @@ helm upgrade --install sda deploy/helm/sda   --set ingress.host=sda.example.com 
 
 | Job | Gates on |
 |---|---|
-| `backend` | `ruff check`, `mypy src`, `alembic upgrade head`, `pytest --cov-fail-under=65` against real Postgres/Redis/SeaweedFS |
-| `frontend` | `oxlint`, `vite build` |
+| `backend` | `ruff check`, `mypy src`, `alembic upgrade head`, `pytest --cov-fail-under=75` against real Postgres/Redis/SeaweedFS |
+| `eval` | The `retrieval` golden-set profile, so retrieval quality cannot regress silently |
+| `frontend` | `oxlint`, `tsc --noEmit`, Vitest, `vite build` including the gzipped bundle budget |
 | `audit` | `pip-audit` on `requirements.txt`, Trivy filesystem scan (HIGH/CRITICAL) |
 | `chart` | `helm lint` and `helm template` |
 | `images` | Builds both images with buildx cache, then Trivy-scans each |
+
+Two more workflows run outside the pull-request path:
+
+| Workflow | When | Does |
+|---|---|---|
+| `eval-nightly.yml` | Nightly | The `generation` golden-set profile, which needs an API key |
+| `supply-chain.yml` | On release and on a schedule | Publishes both images, signs them with keyless cosign, builds an SBOM, attaches it to the image, and scans it |
+| `restore-drill.yml` | Weekly | Seeds a corpus, backs it up, destroys both stores, restores, and verifies the corpus is answerable again |
 
 `ruff.toml` selects `E,F,I,B,C4,SIM,T20`. `UP` (pyupgrade) is deliberately excluded for now:
 turning it on would make this a repo-wide `Optional[X]` to `X | None` rewrite, which belongs in
@@ -313,6 +342,142 @@ erroring. Roles are ordered:
 workspace's admins at `GET /audit`. `tests/test_tenancy.py` asserts that no retrieval path,
 delete, job read or cache entry crosses a workspace boundary.
 
+### API surface
+
+| Method | Path | Role | Purpose |
+|---|---|---|---|
+| `POST` | `/auth/register` | — | Create a workspace and its first admin |
+| `POST` | `/auth/login` | — | Exchange credentials for a bearer token |
+| `GET` | `/auth/me` | viewer | Current principal and role |
+| `GET` `POST` | `/auth/users` | admin | List and create workspace users |
+| `DELETE` | `/auth/users/{user_id}/data` | admin | Right-to-erasure, with a verified receipt |
+| `POST` | `/ingest` | editor | Queue one upload; returns 202 and a `job_id` |
+| `POST` | `/ingest/batch` | editor | Queue several uploads in one request |
+| `GET` | `/jobs/{job_id}` | viewer | Ingest job state |
+| `GET` | `/jobs/{job_id}/events` | viewer | Ingest progress as SSE |
+| `GET` | `/jobs/dead-letters` | admin | Jobs that exhausted their retries |
+| `GET` | `/documents` | viewer | Paginated document list, ETag-cached |
+| `GET` | `/documents/{doc_id}/versions` | viewer | Version history for a filename |
+| `DELETE` | `/documents/{doc_id}` | editor | Soft delete: unanswerable at once, recoverable |
+| `POST` | `/documents/{doc_id}/restore` | editor | Undo a soft delete inside the window |
+| `POST` | `/query` | viewer | Ask a question; SSE by default |
+| `GET` `POST` | `/webhooks` | admin | List and register ingest callbacks |
+| `DELETE` | `/webhooks/{webhook_id}` | admin | Remove a subscription |
+| `GET` | `/audit` | admin | Workspace audit log |
+| `GET` | `/admin/index` | admin + operator | Live and pending index builds |
+| `POST` | `/admin/index/reindex` | admin + operator | Build a new index, then cut over |
+| `POST` | `/admin/index/rollback` | admin + operator | Return the alias to the previous build |
+| `POST` | `/admin/retention/sweep` | admin + operator | Run the retention purge now |
+| `GET` | `/livez` `/health` `/config` `/metrics` | — | Probes, client bootstrap, scrape endpoint |
+
+Conventions that apply to all of it:
+
+- **Errors** are RFC 9457 `application/problem+json`, with a stable `type` URI a client can branch
+  on instead of matching on prose.
+- **`Idempotency-Key`** on unsafe requests, shared across replicas through Redis. A replay of a
+  finished request replays its response; a replay while the first is still in flight is a 409
+  rather than a second execution; the same key with a different body is a 422.
+- **Pagination** is keyset, not offset: follow `next_cursor`. A document inserted mid-page shifts
+  every offset and makes an offset client skip a row; `(created_at, doc_id) > last` does not.
+- **`ETag` / `If-None-Match`** on `/documents`, which the SPA re-reads after every ingest and
+  reconnect. An unchanged list costs a 304 with no body.
+- **Webhooks** are signed per subscription, retried with backoff, and disabled after repeated
+  failure. A webhook URL is caller-controlled input this service then fetches, so registration
+  validates the target and private network ranges are rejected unless explicitly allowed.
+- **Overload** is a 503 with `Retry-After`, never a silent queue.
+
+### Rate limits and spend budgets
+
+Two independent controls (`src/core/limits.py`), both in Redis so every replica enforces one
+number rather than one each. Rate limits are per-tenant token buckets on the query, ingest and
+auth paths — they bound how fast the service is asked to work and refill on their own; the auth
+path buckets by client address, since the caller has no tenant yet. Budgets are daily counters of
+generation tokens and USD — they bound what a tenant can spend, and only a new day clears them.
+Budgets of 0 are off, which is the default; a breach answers 429 with the retryable reason.
+
+### Index rebuilds
+
+`ingest_version` is a hash of the chunker settings and the embedder name. Reads do not use it
+directly — they follow an alias in Postgres that only a cutover moves. That indirection is what
+makes changing a chunk size safe: `POST /admin/index/reindex` builds every live document under the
+new version while the old build keeps serving, then moves the alias; `POST /admin/index/rollback`
+moves it back. Without it, a configuration change silently orphans the entire corpus.
+
+### Data lifecycle and privacy
+
+- **Soft delete.** Chunks are removed immediately, because a deleted document must stop being
+  answerable the moment it is deleted. The row and the stored bytes outlive the index by
+  `RETENTION_SOFT_DELETE_DAYS`, so a delete made in error is recoverable via
+  `POST /documents/{doc_id}/restore`.
+- **Versions.** Replacing a file by name no longer destroys what it replaced: the old row points
+  at the new one, so "which version answered that question last month" has an answer.
+- **Retention sweep.** A periodic purge clears soft-deleted documents, superseded versions, old
+  index builds and (optionally) audit rows past their windows. Two metrics track work the sweep
+  still owes: `sda_retention_overdue_documents` and `sda_reindex_pending_documents`.
+- **Erasure.** `DELETE /auth/users/{user_id}/data` walks Postgres, the object store and Redis,
+  then re-reads each one and returns a receipt counting what is left. Erasure that cannot be
+  verified is not erasure.
+- **PII in telemetry.** `src/core/redaction.py` scrubs log messages, span attributes and the
+  prompt captures shipped to Langfuse — the text that gets read when something is already wrong.
+
+### Security hardening
+
+| Control | Where |
+|---|---|
+| Output-side injection scan; a hit abstains rather than editing the answer | `src/trust/scanner.py`, `SCAN_OUTPUT` |
+| PII redaction over logs, spans and prompt captures | `src/core/redaction.py`, `REDACT_PII` |
+| Security headers, CSP, optional HSTS, explicit CORS allowlist | `src/api/router.py`, `CSP_CONNECT_SRC` / `HSTS_MAX_AGE_S` |
+| Deployment-level gate on admin index and retention routes | `OPERATOR_TOKEN` |
+| Outbound egress block for air-gapped deploys | `NO_EGRESS` |
+| Non-root containers with a read-only root filesystem | `docker/*.Dockerfile` |
+| Signed images with an attached SBOM | `.github/workflows/supply-chain.yml` |
+| Dependency and image scanning on every pull request | `.github/workflows/ci.yml` |
+
+Still open: secrets come from the environment rather than a managed secret store, and PII
+detection is pattern-based rather than a model such as Presidio.
+
+### Backup and restore
+
+`deploy/backup/` dumps Postgres with `pg_dump --format=custom` and mirrors the object store key
+for key, both read through the same configuration the application uses. Redis is deliberately not
+backed up: it holds cache, job state and rate-limit windows, all derived or ephemeral. The targets
+are RPO 24h and RTO 1h, and they are met by the drill passing rather than by the scripts existing
+— a weekly GitHub Actions job seeds a corpus, backs it up, destroys both stores, restores, and
+checks the corpus is answerable again. Full rationale in
+[deploy/backup/README.md](deploy/backup/README.md).
+
+### Load testing
+
+`tests/load/query.js` is a k6 profile for the answer path, kept out of CI because the numbers only
+mean something on hardware you intend to deploy on:
+
+```bash
+k6 run -e BASE_URL=http://127.0.0.1:8000 -e EMAIL=... -e PASSWORD=... tests/load/query.js
+```
+
+It checks the shape of overload rather than a throughput number: that the API sheds with 503
+instead of queueing, and that the answers it does serve stay inside their latency budget while it
+does.
+
+### Frontend resilience
+
+The SPA is a separate deployable, so it is hardened as one:
+
+- **One HTTP boundary.** `api.js` is the only module that talks to the API, and every response is
+  validated against a Zod schema there. The SPA and the API deploy separately, so a renamed field
+  should surface as one named error at the boundary rather than as `undefined` three components
+  deep, where the stack trace no longer says which call produced it.
+- **Error boundary.** A render error anywhere below it shows a recoverable state instead of the
+  blank page React leaves by default, which is indistinguishable from an outage to the person
+  looking at it.
+- **Translation.** Every user-visible string goes through a small catalogue (`src/i18n.js`), so
+  adding a locale is a file rather than a sweep through the components.
+- **Bundle budget.** `npm run build` fails if the gzipped first-visit payload grows past its
+  budget. Error reporting and analytics are opt-in and lazily loaded, so a default build ships
+  neither — otherwise the budget quietly stops meaning anything.
+- **Cold-start handling.** `useBootstrap` retries health forever: a first boot loads models and can
+  take a minute, and a client that gives up in ten seconds reports an outage that is not one.
+
 ### Environment Variables
 
 | Variable | Default | Purpose |
@@ -345,15 +510,100 @@ delete, job read or cache entry crosses a workspace boundary.
 | `WORKER_METRICS_PORT` | `9100` | Port the ingest worker serves `/metrics` on |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` | _(empty)_ | Enable Langfuse prompt traces |
 | `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Langfuse endpoint |
-| `SENTRY_DSN` | _(empty)_ | Enable Sentry error reporting |
+| `SENTRY_DSN` / `SENTRY_TRACES_SAMPLE_RATE` | _(empty)_ / `0.0` | Enable Sentry error reporting, and its own trace sampling |
+| `OTEL_SERVICE_NAME` | `sda` | Service name on spans and metrics |
+| `LANGFUSE_SAMPLE_RATE` | `1.0` | Fraction of queries shipped to Langfuse |
 | `MODEL_PRICING_JSON` | _(empty)_ | Override generation pricing without a deploy: `{"model": [usd_per_mtok_in, usd_per_mtok_out]}` |
 | `HF_TOKEN` | _(empty)_ | Optional; only needed for gated HF models or to avoid anonymous rate limits on embedder/reranker downloads |
+
+**Request handling and limits**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `QUERY_CONCURRENCY` | `8` | Answers in flight per replica; past this the API answers 503 |
+| `QUERY_TIMEOUT_S` | `180` | Hard bound on one answer |
+| `API_PAGE_SIZE` / `API_MAX_PAGE_SIZE` | `50` / `200` | Default and maximum page size for cursor-paginated collections |
+| `IDEMPOTENCY_TTL_S` | `86400` | How long an `Idempotency-Key` stays replayable |
+| `MAX_BULK_FILES` | `10` | Files accepted by `POST /ingest/batch` |
+| `RATE_LIMIT_ENABLED` | `1` | Master switch for the token buckets |
+| `QUERY_RATE_PER_MINUTE` / `QUERY_BURST` | `30` / `10` | Per-tenant query bucket |
+| `INGEST_RATE_PER_MINUTE` / `INGEST_BURST` | `6` / `3` | Per-tenant ingest bucket |
+| `AUTH_RATE_PER_MINUTE` / `AUTH_BURST` | `10` / `5` | Auth bucket, keyed by client address |
+| `DAILY_TOKEN_QUOTA` / `DAILY_COST_USD` | `0` / `0` | Daily generation budgets per tenant; `0` disables |
+
+**Generation failover**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `LLM_FALLBACK_CHAIN` | _(empty)_ | Providers to try after the primary, e.g. `groq,ollama` |
+| `LLM_BREAKER_FAILURES` / `LLM_BREAKER_COOLDOWN_S` | `3` / `60` | Consecutive failures that open a provider's circuit, and how long it stays open |
+
+**Thresholds and flags**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `THRESHOLDS_VERSION` | `v1` | Which `config/thresholds/<version>.yaml` this deploy runs |
+| `THRESHOLD_OVERRIDES_JSON` | _(empty)_ | Per-deploy overrides by dotted path, e.g. `{"trust.abstain_threshold": 0.35}` |
+
+**Ingestion**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `OCR_ENABLED` | `1` | Read scanned PDFs with OCR instead of rejecting them |
+| `OCR_MAX_PAGES` | `50` | Page cap on an OCR run; OCR measures ~9s per page on CPU |
+
+**Retention and lifecycle**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `RETENTION_ENABLED` | `1` | Run the purge sweep |
+| `RETENTION_SOFT_DELETE_DAYS` | `30` | Window in which a deleted document can be restored |
+| `RETENTION_SUPERSEDED_DAYS` | `30` | How long a replaced version is kept |
+| `RETENTION_OLD_INDEX_DAYS` | `7` | How long a superseded index build is kept for rollback |
+| `RETENTION_AUDIT_DAYS` | `0` | Audit log retention; `0` keeps it indefinitely |
+
+**Webhooks**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `WEBHOOKS_ENABLED` | `1` | Accept subscriptions and deliver callbacks |
+| `WEBHOOKS_MAX_PER_TENANT` | `5` | Subscriptions one workspace may hold |
+| `WEBHOOK_TIMEOUT_S` / `WEBHOOK_MAX_ATTEMPTS` / `WEBHOOK_BACKOFF_S` | `5` / `3` / `1` | Delivery timeout, retries and backoff |
+| `WEBHOOK_MAX_FAILURES` | `20` | Consecutive failures after which a subscription is disabled |
+| `WEBHOOK_ALLOW_PRIVATE_TARGETS` | `0` | Permit private-range callback URLs; leave off outside testing |
+
+**Security**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CORS_ALLOW_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | Browser origins allowed to call the API |
+| `CSP_CONNECT_SRC` | `'self'` | `connect-src` for the SPA's CSP when the API is on another origin |
+| `HSTS_MAX_AGE_S` | `0` | Enable HSTS behind TLS; `0` omits the header |
+| `SCAN_OUTPUT` | `1` | Output-side injection scan on generated answers |
+| `REDACT_PII` | `1` | Scrub PII from logs, spans and prompt captures |
+| `NO_EGRESS` | `0` | Block outbound HTTP for air-gapped deploys |
+| `OPERATOR_TOKEN` | _(empty)_ | Deployment-level credential for the admin index and retention routes; unset disables them |
+| `SPOTLIGHT_DOCUMENTS` | `1` | Allow the UI to scope a question to selected documents |
+
+**Frontend build**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VITE_SENTRY_DSN` | _(empty)_ | Enable SPA error reporting; the SDK is lazily loaded and excluded from the bundle budget |
+| `VITE_ANALYTICS_ENDPOINT` | _(empty)_ | Endpoint for web-vitals and product events |
+| `VITE_RELEASE` / `VITE_DEPLOY_ENV` | `dev` / `development` | Release and environment labels on SPA telemetry |
 
 ### Running Tests
 
 ```bash
-pytest tests/ -v
+pip install -r requirements-dev.txt
+pytest -q --cov=src --cov-fail-under=75     # backend; needs the compose stack up
+cd frontend && npm test                     # Vitest
 ```
+
+The backend suite runs against real Postgres, Redis and object storage rather than mocks, because
+the bugs worth catching here are the ones that only appear when state is shared. It resets every
+tenant, so do not run it against a stack that is serving anything you care about.
 
 ### Running Evaluation
 
@@ -434,7 +684,7 @@ When a question can't be answered from the corpus, the system finds the closest-
 | Duplicate filename, new content | Old doc's index, vectors and chip are removed before the new one is added | `src/ingestion/pipeline.py` |
 | LLM provider down / model missing / timeout | Plain-text error, composer re-enabled, no stack trace | `src/generation/client.py` |
 | Double-click Send / upload during an answer | `busy` state blocks re-entrant calls | `frontend/src/hooks/useChat.js` |
-| Browser refresh | Chat history resets, but the on-disk index persists; doc list is reloaded from the ingest manifest on bootstrap | `frontend/src/App.jsx` |
+| Browser refresh | Chat history resets, but the on-disk index persists; doc list is reloaded from `GET /documents` on bootstrap | `frontend/src/App.jsx` |
 | Prompt injection in uploaded document | Source blocks wrapped in per-request random-nonce tags; tag-shaped text inside documents is stripped | `src/generation/prompts.py` |
 | Huge table chunk retrieved | Source truncated to remaining context budget, centered on the matched span | `src/generation/answerer.py` |
 
@@ -442,14 +692,12 @@ When a question can't be answered from the corpus, the system finds the closest-
 
 Evaluated on a 33-item golden set covering single-doc factual, multi-doc comparison, unanswerable, and
 prompt-injection queries against three real public-domain U.S. government documents. Generated with
-`LLM_PROVIDER=ollama` (`qwen3:8b`); re-run after the `hybrid` score-scale fix (see
-`docs/improvement-plan.md` step 1). Re-run with `python -m evaluation.run_eval --mode <mode>` (see
+`LLM_PROVIDER=ollama` (`qwen3:8b`); re-run after the `hybrid` score-scale fix. Re-run with `python -m evaluation.run_eval --mode <mode>` (see
 `evaluation/results/*.md`).
 
 **Default mode: `hybrid_rerank`** (dense + BM25 fusion, cross-encoder reranked)
 
-The mode comparison below predates query decomposition (see **Query decomposition** and
-`docs/production-readiness.md` item 24). Its `hybrid_rerank` column is the *before* half of that
+The mode comparison below predates query decomposition (see **Query decomposition**). Its `hybrid_rerank` column is the *before* half of that
 change: false refusal rate has since gone 0.160 -> 0.000 and MRR 0.948 -> 1.000 on the same golden
 set. The gated numbers under **Eval gating** are the current ones.
 
@@ -502,7 +750,7 @@ against a 0.3 abstain threshold). The injected preamble dominated the cross-enco
 abstain gate was judging the attack text rather than the question, and the system survived an
 injected question by refusing it rather than by resisting it.
 
-That is fixed (`docs/production-readiness.md` item 24): the question is sanitized and decomposed
+That is fixed: the question is sanitized and decomposed
 before it is scored, and each passage keeps its best score across the parts. Current gated baseline,
 `retrieval` profile, 33 items:
 
@@ -537,7 +785,7 @@ decomposition. Reading the answers found why. The model writes citations as `【
 just in the metric. And both citation validity and numeric grounding scored an *uncited* sentence
 as a failure, which made them track how much markdown a model writes: validity is now the
 hallucinated-citation detector alone, coverage is a separate metric, and numeric grounding is
-scored over citing sentences. See `docs/production-readiness.md` item 24.
+scored over citing sentences.
 
 ## AI Tools Used
 

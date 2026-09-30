@@ -52,8 +52,18 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            # huggingface_hub locks before reading a baked-in model, and docling and matplotlib
+            # write into the home cache. Scratch, on a read-only root filesystem.
+            - name: hf-locks
+              mountPath: /app/data/models/hf/.locks
+            - name: home
+              mountPath: /home/sda
       volumes:
         - name: tmp
+          emptyDir: {}
+        - name: hf-locks
+          emptyDir: {}
+        - name: home
           emptyDir: {}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}

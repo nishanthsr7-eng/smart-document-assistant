@@ -29,9 +29,19 @@ RUN pip install --index-url https://download.pytorch.org/whl/cpu \
 FROM deps AS models
 WORKDIR /app
 COPY src ./src
+COPY config ./config
 COPY docker/bake_models.py ./
-RUN DATABASE_URL=bake REDIS_URL=bake S3_ENDPOINT=bake S3_BUCKET=bake \
-    S3_ACCESS_KEY=bake S3_SECRET_KEY=bake JWT_SECRET=bake \
+# Importing the settings validates them, so these placeholders have to be well formed.
+# Nothing here is connected to: the bake only downloads weights.
+#
+# HF_TOKEN arrives as a secret mount rather than a build argument, which would be recorded in
+# the image history. It is optional: without it the pull is anonymous and rate limited, which is
+# what the retry in bake_models.py is for.
+RUN --mount=type=secret,id=hf_token \
+    HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
+    DATABASE_URL=postgresql+psycopg://bake:bake@bake:5432/bake REDIS_URL=redis://bake:6379/0 \
+    S3_ENDPOINT=http://bake:9000 S3_BUCKET=bake S3_ACCESS_KEY=bake S3_SECRET_KEY=bake \
+    JWT_SECRET=bake-only-not-a-real-secret \
     python bake_models.py /opt/models/hf/hub /opt/models/artifacts
 
 
@@ -42,7 +52,9 @@ ENV PATH=/opt/venv/bin:$PATH \
     HF_HOME=/app/data/models/hf \
     HF_HUB_OFFLINE=1 \
     TOKENIZERS_PARALLELISM=false
+# The base image lags Debian's security updates by days, and the image scan gates on them.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
       libgomp1 libgl1 libglib2.0-0 libxcb1 libsm6 libxext6 \
  && rm -rf /var/lib/apt/lists/* \
@@ -54,6 +66,14 @@ WORKDIR /app
 COPY --chown=10001:10001 alembic.ini ./
 COPY --chown=10001:10001 migrations ./migrations
 COPY --chown=10001:10001 src ./src
+# Settings load the versioned threshold artifact at import, so every role needs it present.
+COPY --chown=10001:10001 config ./config
+# pip, setuptools and wheel are build tooling: nothing at runtime imports them, and their
+# vendored copies are the only thing the image scan flags. The current pip still vendors the
+# reported msgpack, so they are removed rather than upgraded.
+RUN find /opt/venv/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages \
+      -maxdepth 1 \( -name 'pip' -o -name 'pip-*' -o -name 'setuptools' \
+      -o -name 'setuptools-*' -o -name 'wheel' -o -name 'wheel-*' \) -exec rm -rf {} +
 COPY --chown=10001:10001 docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 USER 10001

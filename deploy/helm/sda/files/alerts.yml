@@ -1,4 +1,82 @@
 groups:
+  # Recording rules first: every SLO alert below is written against these, so the definition of
+  # "a good request" lives in exactly one place. Changing what counts as good is then one edit,
+  # not an edit per alert, and a dashboard and a page can never disagree about it.
+  - name: sda-sli
+    interval: 30s
+    rules:
+      # Availability. A 5xx is a failure; a 429 or a 503 from load shedding is the service
+      # working as designed under pressure, and putting those in the error budget would mean a
+      # correctly-shedding service pages someone.
+      - record: sda:http_requests:rate5m
+        expr: sum(rate(sda_http_requests_total{route!="/metrics"}[5m]))
+      - record: sda:http_errors:rate5m
+        expr: sum(rate(sda_http_requests_total{route!="/metrics",status=~"5.."}[5m]))
+      - record: sda:availability:ratio_rate5m
+        expr: |
+          1 - (sda:http_errors:rate5m / clamp_min(sda:http_requests:rate5m, 0.001))
+
+      # Latency. The SLI is the share of answers inside the objective, not a quantile: a
+      # quantile cannot be aggregated across windows and cannot be turned into a budget.
+      - record: sda:answers_fast:rate5m
+        expr: sum(rate(sda_answer_duration_seconds_bucket{le="15.0"}[5m]))
+      - record: sda:answers:rate5m
+        expr: sum(rate(sda_answer_duration_seconds_count[5m]))
+      - record: sda:latency_slo:ratio_rate5m
+        expr: sda:answers_fast:rate5m / clamp_min(sda:answers:rate5m, 0.001)
+
+      # Trustworthiness. The one SLI specific to a RAG service, and the one that does not show
+      # up anywhere else: a wrong-but-confident answer is a 200 with a fast latency.
+      - record: sda:citation_validity:ratio_rate30m
+        expr: |
+          sum(rate(sda_citation_checks_total{status="supported"}[30m]))
+            / clamp_min(sum(rate(sda_citation_checks_total{status=~"supported|unsupported"}[30m])), 0.001)
+      - record: sda:abstain:ratio_rate15m
+        expr: |
+          sum(rate(sda_answers_total{status="abstained"}[15m]))
+            / clamp_min(sum(rate(sda_answers_total[15m])), 0.001)
+
+  # Error-budget burn, against the 99.5% availability objective in docs/slos.md. Two windows
+  # per severity, because a single short window alerts on every blip and a single long one
+  # takes hours to notice an outage. The short window is the confirmation: it has to still be
+  # burning now, not just have burned during the long one.
+  - name: sda-error-budget
+    rules:
+      - alert: AvailabilityBudgetBurnFast
+        # 14.4x burn: the month's budget is gone in about two days at this rate.
+        expr: |
+          (1 - avg_over_time(sda:availability:ratio_rate5m[1h])) > 14.4 * 0.005
+          and
+          (1 - avg_over_time(sda:availability:ratio_rate5m[5m])) > 14.4 * 0.005
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Burning the availability budget 14x faster than sustainable."
+          runbook: "docs/runbooks.md#availabilitybudgetburn"
+
+      - alert: AvailabilityBudgetBurnSlow
+        # 6x burn: a week to exhaustion. Ticket, not a page.
+        expr: |
+          (1 - avg_over_time(sda:availability:ratio_rate5m[6h])) > 6 * 0.005
+          and
+          (1 - avg_over_time(sda:availability:ratio_rate5m[30m])) > 6 * 0.005
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Burning the availability budget 6x faster than sustainable."
+          runbook: "docs/runbooks.md#availabilitybudgetburn"
+
+      - alert: LatencyBudgetBurn
+        expr: |
+          (1 - avg_over_time(sda:latency_slo:ratio_rate5m[1h])) > 6 * 0.05
+          and
+          (1 - avg_over_time(sda:latency_slo:ratio_rate5m[5m])) > 6 * 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Answers are missing the 15s objective far faster than the budget allows."
+          runbook: "docs/runbooks.md#answerlatency"
+
   - name: sda-slo
     rules:
       # Answer quality. These are the two that matter for a RAG service and neither shows up in
@@ -12,7 +90,7 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "Under 90% of cited sentences verify against their source."
-          runbook: "Check the reranker handle and the grounding threshold; compare against the last eval run."
+          runbook: "docs/runbooks.md#citationvaliditybelowfloor -- check the reranker handle and the grounding threshold, then compare against the last eval run."
 
       - alert: AbstainRateSpike
         expr: |
@@ -21,7 +99,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "Over 40% of questions abstain."
-          runbook: "Usually retrieval, not the gate: check embedder load, index freshness and sda_retrieval_top_score."
+          runbook: "docs/runbooks.md#abstainratespike -- usually retrieval, not the gate: check embedder load, index freshness and sda_retrieval_top_score."
 
       - alert: AnswerLatencyP95
         expr: |
@@ -30,7 +108,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "p95 answer latency over 15s."
-          runbook: "Break down by sda_stage_duration_seconds to find the stage; generation and rerank are the usual two."
+          runbook: "docs/runbooks.md#answerlatency -- break down by sda_stage_duration_seconds to find the stage; generation and rerank are the usual two."
 
       - alert: HttpServerErrors
         expr: |
@@ -39,6 +117,7 @@ groups:
         labels: {severity: critical}
         annotations:
           summary: "Over 2% of requests are 5xx."
+          runbook: "docs/runbooks.md#httpservererrors"
 
       # max, not avg: every replica reports the same shared queue.
       - alert: IngestQueueBacklog
@@ -47,7 +126,7 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "Ingest backlog is not draining."
-          runbook: "Scale the worker deployment; check sda_ingest_jobs_total{outcome=\"failed\"} and the dead-letter list."
+          runbook: "docs/runbooks.md#ingestqueuebacklog -- scale the worker deployment, then check sda_ingest_jobs_total{outcome=\"failed\"} and the dead-letter list."
 
       - alert: IngestFailureRate
         expr: |
@@ -57,10 +136,61 @@ groups:
         annotations:
           summary: "Over 10% of ingests fail (parse or embed), not counting rejected uploads."
 
+      # Saturation, separated from errors on purpose: a shed query is the API refusing work it
+      # cannot do, not a fault. It shows up in HttpServerErrors too, and this rule is what names
+      # the cause when it does.
+      - alert: QueryLoadShedding
+        expr: sum(rate(sda_queries_abandoned_total{reason="shed"}[10m])) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Queries are being refused at capacity."
+          runbook: "Compare sda_queries_in_flight against api.query_concurrency: scale the API deployment, or raise QUERY_CONCURRENCY if CPU has headroom. reason=timeout instead means answers are running past QUERY_TIMEOUT_S -- look at stage latency first."
+
       - alert: GenerationSpendBurn
         expr: sum(rate(sda_llm_cost_usd_total[1h])) * 24 > 50
         for: 1h
         labels: {severity: warning}
         annotations:
           summary: "Generation spend is tracking above $50/day."
-          runbook: "No per-tenant budget is enforced yet (readiness item 11): check sda_answer_cache_total for a cache that stopped hitting."
+          runbook: "Check sda_answer_cache_total for a cache that stopped hitting, then sda_rate_limited_total{scope=\"budget\"} to see whether any tenant is actually hitting its DAILY_COST_USD -- spend this high with no budget refusals means the budgets are set too loose or are unset."
+
+      # The breaker is per API process, so any worker reporting an outage fires this. A provider
+      # that stays open is running entirely on its fallback, which is a silent degradation: the
+      # answers keep coming, from a different model than the one the evaluation gate measured.
+      - alert: GenerationProviderBreakerOpen
+        expr: max by (provider) (sda_llm_breaker_open) == 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Generation provider {{ $labels.provider }} is failing and being skipped."
+          runbook: "sda_llm_failover_total names who is serving instead. Check the provider's status page and the API key; with no fallback left, /query returns ModelUnavailable."
+
+      - alert: TenantsHittingRateLimits
+        expr: sum by (scope) (rate(sda_rate_limited_total[15m])) > 0.5
+        for: 30m
+        labels: {severity: info}
+        annotations:
+          summary: "Sustained 429s on scope {{ $labels.scope }}."
+          runbook: "Legitimate growth or abuse. Sustained scope=auth is credential stuffing; scope=query or ingest against one tenant means their limit needs raising, or they need a queue rather than a retry loop."
+
+      # Item 22's blue-green cutover only happens on a clean rebuild, so a rebuild that keeps
+      # failing leaves the alias where it is: reads stay correct and a configuration change
+      # silently never takes effect. Nothing else in this file would notice.
+      - alert: ReindexNotProgressing
+        expr: max(sda_reindex_pending_documents) > 0
+        for: 6h
+        labels: {severity: info}
+        annotations:
+          summary: "Documents have been waiting six hours to be rebuilt at the current version."
+          runbook: "docs/runbooks.md#reindexnotprogressing -- only relevant after a chunker or embedder change. GET /admin/index says whether a rebuild is still owed."
+
+      # The retention sweep is the only thing that bounds storage growth, and it fails silently:
+      # everything keeps working, for months, until the disk does not.
+      - alert: RetentionSweepStalled
+        expr: max(sda_retention_overdue_documents) > 0
+        for: 6h
+        labels: {severity: info}
+        annotations:
+          summary: "Soft-deleted documents are past their purge window and still present."
+          runbook: "docs/runbooks.md#retentionsweepstalled"

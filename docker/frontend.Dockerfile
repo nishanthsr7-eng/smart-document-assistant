@@ -17,6 +17,10 @@ RUN npm run build
 
 
 FROM nginxinc/nginx-unprivileged:1.29-alpine AS runtime
+# The upstream image lags Alpine's security updates by days, and the image scan gates on them.
+USER root
+RUN apk upgrade --no-cache
+USER 101
 # The entrypoint runs envsubst over templates; the filter keeps nginx's own $variables intact.
 # LOCAL_RESOLVERS opts into the script that reads the container's nameservers into
 # NGINX_LOCAL_RESOLVERS, which the template needs to re-resolve the API upstream.

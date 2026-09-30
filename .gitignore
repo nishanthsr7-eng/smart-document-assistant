@@ -23,3 +23,13 @@ video/
 .coverage
 coverage.xml
 htmlcov/
+
+# Local backup and restore-drill artifacts.
+backups/
+
+# Submission write-up artifact, built locally.
+docs/submission.pdf
+
+# Coding-assistant configuration, local to this machine.
+CLAUDE.md
+.claude/

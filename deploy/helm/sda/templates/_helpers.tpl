@@ -49,4 +49,9 @@ allowPrivilegeEscalation: false
 readOnlyRootFilesystem: true
 capabilities:
   drop: ["ALL"]
+# The parsers in the worker are the reason this is set: the node's default seccomp profile is
+# what stands between a malformed PDF reaching a C decoder and that decoder reaching a syscall
+# the process has no business making. Unconfined is the Kubernetes default and is not one here.
+seccompProfile:
+  type: RuntimeDefault
 {{- end -}}

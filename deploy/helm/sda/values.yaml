@@ -31,8 +31,14 @@ api:
   podDisruptionBudget:
     enabled: true
     minAvailable: 2
-  # SSE answer streams must finish; the API drains before the pod goes away.
-  terminationGracePeriodSeconds: 120
+  # SSE answer streams must finish; the API drains before the pod goes away. The budget is
+  # preStopDrainSeconds (endpoints propagate, replica reports unready) plus the longest answer
+  # still in flight (QUERY_TIMEOUT_S), which is what uvicorn's --timeout-graceful-shutdown
+  # waits for.
+  terminationGracePeriodSeconds: 220
+  # Must exceed readinessProbe.periodSeconds x failureThreshold, or the service is still
+  # routing here when uvicorn stops accepting.
+  preStopDrainSeconds: 15
 
 worker:
   replicas: 2
@@ -130,23 +136,66 @@ config:
   S3_REGION: us-east-1
   LLM_PROVIDER: gemini
   GEMINI_MODEL: gemini-3.6-flash
+  # Ordered failover chain after LLM_PROVIDER. Each name needs its own key in the secret, or it
+  # trips its breaker on the first call and is skipped from then on.
+  LLM_FALLBACK_CHAIN: groq
+  LLM_BREAKER_FAILURES: "3"
+  LLM_BREAKER_COOLDOWN_S: "60"
   DEPLOY_ENV: production
   LOG_LEVEL: INFO
   OTEL_SERVICE_NAME: sda
   DB_POOL_SIZE: "5"
   DB_POOL_MAX_OVERFLOW: "10"
   ACCESS_TOKEN_TTL_S: "43200"
+  # Concurrent answers per API replica, and the wall-clock life of one. The pod's CPU request
+  # should cover this many concurrent reranker passes; past the cap /query sheds with a 503.
+  QUERY_CONCURRENCY: "8"
+  QUERY_TIMEOUT_S: "180"
+  # Collection pages and the replay window for an Idempotency-Key.
+  API_PAGE_SIZE: "50"
+  API_MAX_PAGE_SIZE: "200"
+  IDEMPOTENCY_TTL_S: "86400"
+  MAX_BULK_FILES: "10"
+  # Retention windows. The soft-delete window is how long a delete stays recoverable; the old
+  # index window is how long a reindex can be rolled back by pointing the alias back.
+  RETENTION_ENABLED: "1"
+  RETENTION_SOFT_DELETE_DAYS: "30"
+  RETENTION_SUPERSEDED_DAYS: "30"
+  RETENTION_OLD_INDEX_DAYS: "7"
+  RETENTION_AUDIT_DAYS: "0"
+  # Ingest callbacks. A private-address target is refused: a webhook URL is tenant-controlled
+  # input that this pod would otherwise fetch with the cluster's own network identity.
+  WEBHOOKS_ENABLED: "1"
+  WEBHOOKS_MAX_PER_TENANT: "5"
+  WEBHOOK_TIMEOUT_S: "5"
+  WEBHOOK_MAX_ATTEMPTS: "3"
+  WEBHOOK_MAX_FAILURES: "20"
+  WEBHOOK_ALLOW_PRIVATE_TARGETS: "0"
   # OCR for PDFs with no text layer. The cap is what keeps an OCR job inside its 900s timeout;
   # raise both together if the worker gets more CPU.
   OCR_ENABLED: "1"
   OCR_MAX_PAGES: "50"
+  # Per-tenant limits, shared across replicas through Redis. The rates are sustained per minute
+  # and the bursts are how far ahead one tenant may run; auth is limited per client address.
+  # Budgets are a hard daily stop on generation spend -- set them before opening a tenant up.
+  RATE_LIMIT_ENABLED: "1"
+  QUERY_RATE_PER_MINUTE: "30"
+  QUERY_BURST: "10"
+  INGEST_RATE_PER_MINUTE: "6"
+  INGEST_BURST: "3"
+  AUTH_RATE_PER_MINUTE: "10"
+  AUTH_BURST: "5"
+  DAILY_TOKEN_QUOTA: "2000000"
+  DAILY_COST_USD: "10"
 
 # Secrets. `existingSecret` is the production path: point at a Secret written by an external
 # secrets operator and leave `secrets` empty so nothing lands in values or in Helm history.
 existingSecret: ""
 secrets: {}
   # JWT_SECRET: ""
+  # OPERATOR_TOKEN: ""   # required for /admin/*; unset disables those endpoints
   # GEMINI_API_KEY: ""
+  # GROQ_API_KEY: ""
   # LANGFUSE_PUBLIC_KEY: ""
   # LANGFUSE_SECRET_KEY: ""
   # SENTRY_DSN: ""

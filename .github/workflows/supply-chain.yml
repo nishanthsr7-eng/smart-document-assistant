@@ -1,0 +1,111 @@
+name: supply-chain
+
+# What is in the images, and proof of who built them. Separate from ci.yml because it only has
+# something to say about an image that is going to be published: it pushes to GHCR, signs with
+# cosign keyless (the OIDC identity of this workflow, no private key to leak or rotate), and
+# attaches the SBOM as an attestation on the image rather than as a build artifact that outlives
+# nothing. A consumer can then verify the signature and read the bill of materials from the
+# registry with no access to this repository.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  # cosign keyless and the SBOM attestation both sign with a short-lived OIDC token.
+  id-token: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            dockerfile: docker/backend.Dockerfile
+          - name: frontend
+            dockerfile: docker/frontend.Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.name }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,format=long
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Optional: an anonymous weight pull from a shared runner address is rate limited.
+          secrets: hf_token=${{ secrets.HF_TOKEN }}
+          # Records the build's own inputs alongside the image. The SBOM below describes what
+          # ended up inside it; provenance describes how it got there.
+          provenance: mode=max
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign the image
+        run: |
+          cosign sign --yes \
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.name }}@${{ steps.build.outputs.digest }}
+
+      - name: Build the SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.name }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+
+      - name: Attach the SBOM to the image
+        run: |
+          cosign attest --yes --type spdxjson --predicate sbom-${{ matrix.name }}.spdx.json \
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.name }}@${{ steps.build.outputs.digest }}
+
+      # Fails the job on a fixable high or critical. Unfixable findings are reported and do not
+      # block: there is nothing to do about them in this repository, and a gate that cannot be
+      # satisfied gets switched off.
+      # .grype.yaml holds the findings that are fixed upstream but unreachable from here, with a
+      # reason each. The action has no config input, so the path is passed through the env.
+      - name: Scan the SBOM
+        uses: anchore/scan-action@v5
+        env:
+          GRYPE_CONFIG: ${{ github.workspace }}/.grype.yaml
+        with:
+          sbom: sbom-${{ matrix.name }}.spdx.json
+          severity-cutoff: high
+          only-fixed: true
+          output-format: table
+          fail-build: true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbom-${{ matrix.name }}
+          path: sbom-${{ matrix.name }}.spdx.json

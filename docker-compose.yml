@@ -103,12 +103,33 @@ services:
       objectstore:
         condition: service_healthy
 
+  # The worker is the only process that runs an untrusted file through a parser: pypdf, docling,
+  # RapidOCR and BLIP are a lot of C and a lot of model code to hand a stranger's PDF. It is
+  # confined accordingly -- no new privileges, every capability dropped, a read-only root with
+  # writable tmpfs for the spooled upload and the model cache, and a hard memory cap so a
+  # decompression bomb dies rather than taking the host's page cache with it. The API process is
+  # not confined this way because it never parses: /ingest only queues.
   worker:
     profiles: ["app"]
     image: sda-backend:dev
     command: ["worker"]
     expose:
       - "9100"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      # The upload spools here past upload_spool_mb, and noexec means nothing that lands in it
+      # can be run even if a parser is talked into writing a file.
+      - /tmp:rw,noexec,nosuid,size=1g
+      # huggingface_hub takes a lock before it reads a baked-in model, and docling and matplotlib
+      # write into the home cache. Both are scratch; neither survives the container.
+      - /app/data/models/hf/.locks:rw,noexec,nosuid,size=16m
+      - /home/sda:rw,noexec,nosuid,size=256m
+    mem_limit: 4g
+    pids_limit: 512
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:

@@ -13,7 +13,7 @@ pypdf==6.19.0
 python-dotenv==1.2.3
 pyyaml==6.0.3
 docling==2.130.0
-fastapi==0.121.2
+fastapi==0.142.0
 uvicorn==0.35.0
 python-multipart==0.0.32
 # Settings are read and validated at startup, not at class-definition time: src/core/config.py.

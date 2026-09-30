@@ -126,7 +126,13 @@ def _drain_on_signal() -> None:
 
     Uvicorn's own handler is kept and called after -- replacing it would mean the process never
     shuts down.
+
+    Only the main thread may install a handler, and only a server process has a shutdown to
+    drain: a harness that drives the app from a worker thread runs the lifespan there and would
+    otherwise fail on the first signal.signal call.
     """
+    if threading.current_thread() is not threading.main_thread():
+        return
     for sig in (signal.SIGTERM, signal.SIGINT):
         previous = signal.getsignal(sig)
 
@@ -139,7 +145,14 @@ def _drain_on_signal() -> None:
         signal.signal(sig, handler)
 
 
-app = FastAPI(title="Smart Document Assistant", version="1.0", lifespan=lifespan)
+# FastAPI's native instrumentation would double every request: this app emits its own server
+# span in `_observe_request`, which is also where the probe paths are held out.
+app = FastAPI(
+    title="Smart Document Assistant",
+    version="1.0",
+    lifespan=lifespan,
+    telemetry={"tracing": False},
+)
 
 # Everything a consumer calls hangs off this router and is mounted twice: once under /v1, which
 # is the contract, and once unversioned for the paths that already exist. The unversioned mount
