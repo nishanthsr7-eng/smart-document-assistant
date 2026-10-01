@@ -225,5 +225,5 @@ has an alert at all.
 
 Not an alert — the procedure for the worst case. See
 [deploy/backup/README.md](../deploy/backup/README.md). The short version: `python -m
-deploy.backup.backup restore --from <backup>`, then verify with `snapshot`. The weekly
-`restore-drill` workflow is what keeps that procedure from being fiction.
+deploy.backup.backup restore --from <backup>`, then verify with `snapshot`. Rehearse it against a scratch
+deployment before you need it.

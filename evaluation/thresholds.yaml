@@ -4,7 +4,7 @@
 # Two profiles because CI has no API key:
 #   retrieval  — LLM_PROVIDER=none, --no-generate. Runs on every PR. Gates the parts that do not
 #                need a provider: ranking, context assembly, and the abstain gate.
-#   generation — needs GEMINI_API_KEY/GROQ_API_KEY or a local Ollama. Run nightly or manually.
+#   generation — needs GEMINI_API_KEY/GROQ_API_KEY or a local Ollama. Run manually.
 #
 # Floors are set below the measured baseline with headroom for run-to-run variance in the
 # reranker, not at the baseline itself: a gate that fires on noise gets disabled within a week.

@@ -263,7 +263,7 @@ what it replaced: the old row points at the new one through `superseded_by`, so
 `GET /documents/{doc_id}/versions` can answer which version was live when a question was asked. A
 sweep purges past the retention windows, and `DELETE /auth/users/{user_id}/data` walks Postgres,
 the object store and Redis, then re-reads each and returns a countable receipt. Backup scope,
-RPO/RTO and the weekly restore drill are in
+RPO/RTO and the restore drill are in
 [deploy/backup/README.md](../deploy/backup/README.md).
 
 ## 13. Frontend
@@ -283,7 +283,7 @@ erasure, security, config validation, the OpenAPI and SSE contracts, and propert
 invariants — gated at 75% coverage against real Postgres, Redis and object storage. Vitest covers
 the API client, the i18n catalogue and the components with logic in them. `evaluation/run_eval.py`
 scores a golden set and gates CI on it in two profiles: `retrieval` on every pull request without
-an API key, `generation` nightly with one. `tests/load/query.js` is a k6 profile for the answer
+an API key, `generation` on demand with one. `tests/load/query.js` is a k6 profile for the answer
 path, run by hand against hardware worth measuring.
 
 ## 15. Load-bearing decisions

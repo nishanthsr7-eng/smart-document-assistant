@@ -75,6 +75,6 @@ the time, the output is a written decision superseding it.
 
 ## Not done
 
-There is no rotation, no paging integration, and no escalation policy, because there is no team
-— this is a take-home project. What is real here is the alert-to-runbook mapping, the severity
+There is no rotation, no paging integration, and no escalation policy: those depend on the team
+running the service. What is real here is the alert-to-runbook mapping, the severity
 definitions, and the levers, all of which are testable against the code as it stands.

@@ -63,9 +63,8 @@ is deliberately more than row counts:
 
 It exits non-zero if any of those differ, which is what lets CI run it unattended.
 
-**It destroys the stores it is pointed at.** Run it against a scratch deployment -- which is
-what `.github/workflows/restore-drill.yml` does every Monday, against ephemeral services, on a
-corpus it ingests first. Never point it at production.
+**It destroys the stores it is pointed at.** Run it against a scratch deployment, on a corpus
+seeded with `seed_drill_corpus.py` first. Never point it at production.
 
 ## Not done
 

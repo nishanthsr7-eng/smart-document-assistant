@@ -91,7 +91,7 @@ jobs:
   # Quality gate. Runs the golden set against the retrieval profile in evaluation/thresholds.yaml
   # and fails the PR on a breach. No API key exists here, so generation is not exercised
   # (LLM_PROVIDER=none): this gates ranking, context assembly and the abstain gate. The
-  # generation profile needs a provider and runs nightly.
+  # generation profile needs a provider and is run by hand (see the README).
   eval:
     runs-on: ubuntu-latest
     services:
