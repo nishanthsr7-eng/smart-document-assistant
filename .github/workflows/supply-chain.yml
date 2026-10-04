@@ -14,7 +14,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # On tag pushes sbom-action attaches the SBOM to the GitHub release.
+  contents: write
   packages: write
   # cosign keyless and the SBOM attestation both sign with a short-lived OIDC token.
   id-token: write
