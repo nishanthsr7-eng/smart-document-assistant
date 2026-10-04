@@ -1,6 +1,6 @@
 graph TB
-    QV["Query variants<br/>raw + 3 expansions"] --> D["Dense: ChromaDB cosine<br/>doc_id filter, k=30 each"]
-    QT["Query tokens<br/>stopword-filtered"] --> L["Lexical: BM25Okapi<br/>k=30"]
+    QV["Query variants<br/>raw + 3 expansions"] --> D["Dense: pgvector cosine<br/>doc_id filter, k=30 each"]
+    QT["Query tokens<br/>stopword-filtered"] --> L["Lexical: Postgres tsvector<br/>ts_rank_cd<br/>k=30"]
 
     D --> M["merge_dense<br/>keep best cosine per chunk_id"]
     M --> F["RRF score = sum of 1 / k + rank<br/>k = 60"]
@@ -14,5 +14,5 @@ graph TB
     TOP --> CE["Cross-encoder<br/>mxbai-rerank-base<br/>scores query x chunk directly"]
     CE --> OUT["Ranked hits<br/>top_score, top1-top2 margin"]
 
-    NOTE["Why both: dense catches paraphrase,<br/>BM25 catches exact identifiers, codes,<br/>rare terms that embeddings blur.<br/>The cross-encoder then reads each<br/>pair jointly instead of comparing vectors."]
+    NOTE["Why both: dense catches paraphrase,<br/>lexical catches exact identifiers, codes,<br/>rare terms that embeddings blur.<br/>The cross-encoder then reads each<br/>pair jointly instead of comparing vectors."]
     CE -.-> NOTE

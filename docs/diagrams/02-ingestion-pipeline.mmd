@@ -8,9 +8,9 @@ graph LR
     EL --> PC["Parent chunks ~800 tok<br/>section-aware grouping"]
     PC --> CC["Child chunks ~200 tok<br/>sentence windows, 1-sentence overlap<br/>atomic for tables/figures"]
     CC --> EMB["Embed child.embed_text<br/>bge-base, normalised"]
-    EMB --> CH["ChromaDB chunks collection<br/>persisted, cosine"]
-    CC --> BM["BM25 index<br/>header + text tokens"]
-    PC --> PJ["data/parents/doc_id.json<br/>full parent text + char spans"]
-    PJ --> MF["Manifest<br/>doc_id = content hash<br/>+ ingest_version"]
+    EMB --> CH["Postgres chunks<br/>pgvector embedding, cosine"]
+    CC --> BM["tsvector column<br/>header + text"]
+    PC --> PJ["MinIO parent blob<br/>full parent text + char spans"]
+    PJ --> MF["documents row<br/>doc_id = content hash<br/>+ ingest_version"]
 
     MF -.->|"same hash: short-circuit<br/>same filename: replace"| U

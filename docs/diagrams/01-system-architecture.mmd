@@ -4,19 +4,19 @@ graph TB
     end
 
     subgraph API["API - src/api/"]
-        R["FastAPI router<br/>/health /documents /ingest /query"]
+        R["FastAPI router<br/>JWT auth, tenant from token<br/>/documents /ingest /query"]
     end
 
     subgraph ING["Ingestion - src/ingestion/"]
         P["parsers.py<br/>docling / pypdf / BLIP"]
         C["chunker.py<br/>parent 800 tok / child 200 tok"]
-        PL["pipeline.py<br/>content-hash doc_id + manifest"]
+        PL["pipeline.py<br/>content-hash doc_id<br/>arq ingest worker"]
     end
 
     subgraph RET["Retrieval - src/retrieval/"]
         E["embedder.py<br/>bge-base-en-v1.5"]
-        V["vector_store.py<br/>ChromaDB cosine"]
-        K["keyword_index.py<br/>BM25Okapi"]
+        V["vector_store.py<br/>pgvector cosine"]
+        K["keyword_index.py<br/>Postgres tsvector"]
         H["hybrid.py<br/>RRF fusion"]
         RR["reranker.py<br/>mxbai-rerank-base"]
     end
@@ -33,11 +33,21 @@ graph TB
         CF["confidence.py"]
     end
 
+    subgraph ST["State - src/storage/"]
+        PG[("Postgres<br/>pgvector + tsvector")]
+        RD[("Redis<br/>queue, cache, locks")]
+        S3[("MinIO / S3<br/>raw files + parents")]
+    end
+
     UI -->|"HTTP REST"| R
     R --> PL
     R --> A
     PL --> P --> C --> E
     E --> V
+    V --> PG
+    K --> PG
+    PL --> S3
+    R --> RD
     C --> K
     A --> E
     A --> H

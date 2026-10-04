@@ -2,7 +2,25 @@
 
 A RAG (Retrieval-Augmented Generation) application for uploading PDF and TXT documents, asking questions, and getting cited answers with calibrated confidence scores. Embeddings, vector store, and reranking run locally; generation defaults to a free-tier cloud API (see **Provider Choice** below), with a fully-offline Ollama fallback.
 
-![The assistant after sign-in: the question composer, the attach control, and the retrieval-mode selector](docs/screenshots/app.webp)
+**Why it exists:** chat assistants answer confidently even when they are guessing. This one answers
+only from your documents, shows the exact passage behind each sentence, and says "I don't know"
+when the documents don't cover the question.
+
+![Demo: upload a leave-policy PDF and an ethics regulation, ask about annual leave, and get a cited answer with its confidence breakdown and source passages](docs/screenshots/demo.gif)
+
+## Quick start
+
+Needs Docker and a free [Gemini API key](https://aistudio.google.com/apikey).
+
+```bash
+cp .env.example .env    # set GEMINI_API_KEY and JWT_SECRET
+docker compose --profile app up -d --build    # or: make up
+```
+
+Open `http://localhost:8080`, create a workspace, upload a PDF or TXT file and ask a question. The
+first build is slow because the model weights are baked into the image.
+
+Running on the host instead, tests and evaluation: [docs/setup.md](docs/setup.md).
 
 ## Features
 
@@ -21,51 +39,14 @@ A RAG (Retrieval-Augmented Generation) application for uploading PDF and TXT doc
 
 ## Architecture
 
-```
-User
-  |
-  v
-+---------------------------+
-|  React UI (frontend/)     |  Upload / Ask / View answers
-|  Vite SPA, React hooks    |
-|  index.css, components/   |
-+---------------------------+
-  |                |
-  v                v
-+---------------------------+
-|  FastAPI (src/api/)       |  REST endpoints
-|  router.py, schemas.py    |
-+---------------------------+
-  |                |
-  v                v
-+------------+  +---------------------+
-| Ingestion  |  | Answer pipeline     |
-| pipeline   |  | (orchestrated by    |
-| (src/      |  |  answerer.py)       |
-| ingestion/)|  +---------------------+
-  |                |         |        |
-  v                v         v        v
-+--------+  +---------+ +--------+ +--------+
-| Parsers|  | Hybrid  | | Trust  | | LLM    |
-| docling|  | search  | | layer  | | Gemini/|
-| pypdf  |  | dense + | | abstain| | Groq/  |
-| BLIP*  |  | tsvec + | | cite   | | Ollama |
-+--------+  | rerank  | | confid.| +--------+
-  |         +---------+ +--------+
-  v              |
-+--------+  +-------------------+
-| Chunker|  | Postgres          |
-| parent/|  | pgvector + tsvector
-| child  |  | + docs/chunks     |
-+--------+  +-------------------+
-  |              |
-  v              v
-+--------+  +---------+
-| MinIO  |  | Redis   |
-| raw +  |  | cache + |
-| parents|  | locks   |
-+--------+  +---------+
-```
+![System architecture: React SPA, FastAPI, ingest worker, Postgres/pgvector, Redis, MinIO and the LLM providers](docs/diagrams/01-system-architecture.webp)
+
+More diagrams: [ingestion pipeline](docs/diagrams/02-ingestion-pipeline.webp) ·
+[answer pipeline](docs/diagrams/03-answer-pipeline.webp) ·
+[hybrid retrieval](docs/diagrams/04-hybrid-retrieval.webp) ·
+[trust layer](docs/diagrams/05-trust-layer.webp) ·
+[confidence weights](docs/diagrams/06-confidence-weights.webp) ·
+[request sequence](docs/diagrams/07-request-sequence.webp)
 
 **Data flow:**
 
@@ -116,6 +97,8 @@ data/sample_docs/        Three real public-domain U.S. government documents
 
 | Document | What it covers |
 |---|---|
+| [docs/setup.md](docs/setup.md) | Host setup, Ollama, tests and evaluation |
+| [docs/hallucination-handling.md](docs/hallucination-handling.md) | Abstention, citation validation, confidence, injection defense, query decomposition |
 | [docs/architecture.md](docs/architecture.md) | As-built engineering reference: topology, data model, request paths, decisions |
 | [docs/slos.md](docs/slos.md) | Service level objectives, error budgets, and what each one is measured from |
 | [docs/runbooks.md](docs/runbooks.md) | Per-alert diagnosis and remediation |
@@ -130,17 +113,17 @@ data/sample_docs/        Three real public-domain U.S. government documents
 |---|---|---|
 | **LLM** | Gemini (`gemini-3.6-flash`) by default; Groq or Ollama `qwen3:8b` as swappable providers | Free-tier cloud inference is far faster than CPU-only local generation; see **Provider Choice** below. Answers are plain text with inline `[n]` citation markers, parsed by `prompts.parse_citations` — not schema-enforced JSON. |
 | **Embeddings** | `BAAI/bge-base-en-v1.5`, in-process or on a TEI service | Runs locally on CPU, strong retrieval quality for its size, well-tested for semantic search. Set `TEI_EMBED_URL` to move the forward pass onto HuggingFace Text Embeddings Inference; see [Inference service](docs/operations.md#inference-service). |
-| **Reranker** | `mxbai-rerank-base-v1`, in-process or on a TEI service | Cross-encoder precision pass; used as a trust signal for confidence/citation scoring, and for reranking retrieval results in the default mode. Scored against each sub-query of a compound question, not the whole string; see **Query decomposition**. |
-| **Vector store** | Postgres + pgvector (HNSW, cosine) | One transactional store for metadata and vectors, shared by every API worker. Replaces embedded ChromaDB, which was single-writer, per-process and unreplicable. |
-| **Lexical search** | Postgres `tsvector` + GIN | Complements dense search for keyword-heavy queries (policy numbers, proper nouns). Replaces in-process BM25, whose corpus lived in one worker's RAM. Ranking is `ts_rank_cd`; fusion is rank-based, so the change of scale is immaterial. |
-| **System of record** | Postgres (`documents`, `chunks`) via SQLAlchemy 2.0 + Alembic | Replaces `manifest.json`, which was a read-modify-write with no lock. |
+| **Reranker** | `mxbai-rerank-base-v1`, in-process or on a TEI service | Cross-encoder precision pass; used as a trust signal for confidence/citation scoring, and for reranking retrieval results in the default mode. Scored against each sub-query of a compound question, not the whole string; see [Query decomposition](docs/hallucination-handling.md#query-decomposition). |
+| **Vector store** | Postgres + pgvector (HNSW, cosine) | One transactional store for metadata and vectors, shared by every API worker. |
+| **Lexical search** | Postgres `tsvector` + GIN | Complements dense search for keyword-heavy queries (policy numbers, proper nouns). Ranked with `ts_rank_cd`. |
+| **System of record** | Postgres (`documents`, `chunks`) via SQLAlchemy 2.0 + Alembic | Documents and chunks are rows with migrations, so ingestion is transactional and every worker sees the same state. |
 | **Blob storage** | S3/MinIO | Raw uploads and parent-chunk payloads. Survives a pod restart and is visible to every replica. |
 | **Health probes** | `/livez` static; `/health` pings backends only, memoized 10s | Safe for a k8s probe: no embedding pass, no provider call, no collection scan. |
 | **Cache and locks** | Redis | Answer cache and parent-payload cache are shared, so invalidation on ingest reaches every worker; the ingest lock serializes replace-by-filename across processes. |
 | **PDF parsing** | docling + pypdf | docling handles complex layouts (tables, figures, sections); pypdf is a fast path for simple text PDFs, saving 3-10s per file. |
 | **OCR** | RapidOCR (ONNX Runtime) via docling | Only reached when a PDF's text layer is below the per-page floor. ONNX means ~30 MB of weights, no system package (no tesseract binary) and no GPU, and the artifacts are baked into the image with the rest. Retrieval parity against a rasterised copy of a sample document is measured in `evaluation/results/ocr_parity.md`. |
 | **Figure captioning** | BLIP (`blip-image-captioning-base`) | `parsers.FigureCaptioner` runs behind the same lazy-singleton pattern as the embedder; the `/ingest` route constructs one and every extracted figure gets indexed as `[Figure, p.N: <caption>]` instead of a bare placeholder. |
-| **UI** | React + Vite | Fast, modern SPA with custom CSS modules. Replaces the older Streamlit prototype. |
+| **UI** | React + Vite | Fast, modern SPA with custom CSS modules. |
 | **Chunking** | Parent/child (800/200 tokens) | Children are sized to the embedder's token window; parents provide full context to the LLM. Structure-aware splitting preserves section boundaries. |
 
 **Trade-offs:**
@@ -148,155 +131,27 @@ data/sample_docs/        Three real public-domain U.S. government documents
 - **Hybrid search vs. dense-only**: Adds ~2ms but catches keyword queries that dense search misses (e.g., specific section numbers).
 - **Cross-encoder reranking**: The default mode (`hybrid_rerank`). Adds latency on CPU; `hybrid` (no rerank) and `dense` are available for faster, lower-precision answers.
 
+## Evolution and design decisions
+
+The first version was a single-process prototype; moving to shared state is what made multiple
+workers, replicas and tenants possible.
+
+- **ChromaDB to pgvector.** Embedded ChromaDB was single-writer, per-process and could not be
+  replicated. Vectors now live next to their metadata in one transactional store.
+- **In-process BM25 to Postgres `tsvector`.** The BM25 corpus lived in one worker's RAM. Fusion is
+  rank-based, so moving to `ts_rank_cd` and its different score scale changed nothing downstream.
+- **`manifest.json` to Postgres rows.** The manifest was a read-modify-write with no lock, so
+  concurrent ingests could overwrite each other.
+- **Local files to S3/MinIO.** Raw uploads and parent chunks survive a pod restart and every
+  replica can see them.
+- **Streamlit to React.** The prototype UI was Streamlit. The React SPA streams answers over SSE
+  and renders citation chips and the confidence breakdown.
+
 ## Provider Choice
 
 Generation is pluggable via `LLM_PROVIDER` (`src/generation/client.py`): `gemini` (default), `groq`, `ollama`, or `none`.
 
-The default is a cloud API, not fully-offline local inference, because CPU-only generation with a model capable enough to follow citation instructions reliably is slow (multi-second per answer) on typical laptop hardware. Gemini and Groq both have generous free tiers that need only a key pasted into `.env` — no payment method, no account beyond the API signup. `ollama` remains available as a genuinely offline fallback (`qwen3:8b`) for anyone who'd rather not use a cloud key at all; set `LLM_PROVIDER=ollama` and follow the Ollama setup steps below.
-
-## How to Run
-
-### Prerequisites
-- Python 3.10+
-- Docker (for Postgres, Redis and MinIO — the service has no local-disk fallback)
-- A free API key from [Google AI Studio](https://aistudio.google.com/apikey) (default provider) — or [Ollama](https://ollama.com) installed if you'd rather run fully offline
-
-### Setup
-
-```bash
-# 1. Create and activate a virtual environment
-python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # Linux/Mac
-
-# 2. Install CPU-only PyTorch (avoids pulling a ~2GB CUDA build). torchvision from the same
-#    index: docling pulls it in, and PyPI's build fails to register its ops against a CPU torch.
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Copy the environment file and add your key
-copy .env.example .env        # Windows
-# cp .env.example .env        # Linux/Mac
-# edit .env and set GEMINI_API_KEY (or switch LLM_PROVIDER=ollama, see Provider Choice)
-# the DATABASE_URL / REDIS_URL / S3_* defaults already match docker-compose.yml
-# set JWT_SECRET -- the API will not start without it:
-#   python -c "import secrets; print(secrets.token_urlsafe(48))"
-
-# 5. Start the shared state backends and apply the schema
-docker compose up -d
-alembic upgrade head
-
-# 6. Run the FastAPI backend (now safe to run with multiple workers)
-uvicorn src.api.router:app --host 127.0.0.1 --port 8000 --workers 4
-
-# 7. In a second terminal, start the ingest worker (uploads are queued, not parsed in the API)
-python -m arq src.ingestion.worker.WorkerSettings
-
-# 8. In a third terminal, start the React frontend
-cd frontend
-npm install
-npm run dev
-```
-
-If using `LLM_PROVIDER=ollama` instead, pull the model and start a project-scoped server before step 5:
-
-```bash
-set OLLAMA_HOST=127.0.0.1:11435
-set OLLAMA_MODELS=data\models\ollama
-ollama pull qwen3:8b
-ollama serve
-# (keep this terminal open)
-```
-
-The app opens at `http://localhost:5173`. Create a workspace on the sign-in screen (the first user
-of a workspace is its admin), then upload a PDF or TXT file, wait for indexing, and ask a question.
-
-### Running in containers
-
-The dev loop above keeps the code on the host. To run the whole thing in containers instead:
-
-```bash
-docker compose --profile app up -d --build
-```
-
-That builds two images from `docker/`, applies migrations as a one-shot `migrate` service, then
-starts the API, the ingest worker and an nginx-served SPA on `http://localhost:8080`. The API and
-the worker are the *same* image with a different entrypoint argument (`api` / `worker` /
-`migrate`), so they cannot drift apart on dependencies.
-
-The backend image bakes the model weights in: bge, mxbai, BLIP and the docling artifacts are
-~1.5 GB, and pulling them at boot would mean minutes of downloading before a fresh replica is
-ready. `HF_HUB_OFFLINE=1` in the image makes a missed bake fail loudly instead of silently
-reaching for HuggingFace at runtime. The first build is therefore slow; layers cache afterwards.
-
-Both images run as a non-root user with a read-only root filesystem.
-
-For Kubernetes, TEI inference, observability, CI and the full list of environment variables,
-see [docs/operations.md](docs/operations.md).
-
-### Running Tests
-
-```bash
-pip install -r requirements-dev.txt
-pytest -q --cov=src --cov-fail-under=75     # backend; needs the compose stack up
-cd frontend && npm test                     # Vitest
-```
-
-The backend suite runs against real Postgres, Redis and object storage rather than mocks, because
-the bugs worth catching here are the ones that only appear when state is shared. It resets every
-tenant, so do not run it against a stack that is serving anything you care about.
-
-### Running Evaluation
-
-```bash
-python -m evaluation.run_eval --mode hybrid --generate
-```
-
-The run ingests `data/sample_docs` into a reserved evaluation tenant. The test suite resets every
-tenant, so do not run `pytest` against the same stack while an evaluation is in flight.
-
-## Hallucination Handling
-
-The system uses a multi-layer defense against hallucination:
-
-### 1. Abstention Gate (pre-generation)
-Before calling the LLM, the system checks whether retrieved passages are relevant enough to answer the question. If the best retrieval score is below the calibrated threshold (0.3, swept against the golden set), it refuses to answer rather than generating from weak evidence. A retrieval-consensus override prevents false refusals when both dense and lexical search independently rank the same chunk highly.
-
-### 2. Source-Constrained Prompting
-The LLM is prompted to answer only from the numbered source blocks and to cite each sentence with inline `[n]` markers tied to source IDs, which `prompts.parse_citations` extracts from the plain-text response. The prompt explicitly instructs the model to say it cannot answer if no source covers the question.
-
-### 3. Citation Validation (post-generation)
-After generation, each sentence's cited sources are validated using the cross-encoder reranker. If a citation doesn't match its claimed source passage above a support threshold, it's flagged as "unverified" in the UI. Sentences with no valid citations are marked "unsupported."
-
-### 4. Confidence Scoring
-A calibrated confidence score combines retrieval quality and citation validity. The score and label (High/Medium/Low) are shown to the user, so they can judge how much to trust the answer.
-
-### 5. Conflict Detection
-When different sources provide conflicting information (e.g., different numeric values for the same claim), the system surfaces the conflict explicitly rather than silently picking one.
-
-### 6. Prompt Injection Defense
-Uploaded documents are untrusted input. Source blocks in the prompt are wrapped in random-nonce XML tags, and any tag-like text inside the document is stripped, preventing a malicious document from forging citation boundaries or injecting instructions.
-
-The *question* is untrusted too. `query.sanitize` drops clauses that instruct the assistant
-("ignore all previous instructions", "you are now in developer mode", "reveal your system prompt")
-and keeps the clauses that ask about documents, before anything else sees the text: the embedding,
-the cross-encoder pair, the abstain gate and the prompt all run on what was actually asked. If
-every clause is an instruction there is nothing left to retrieve on, the original goes through
-unchanged, and the abstain gate refuses it. Matching is literal, not a classifier -- a fuzzy rule
-here would start deleting genuine questions about what a policy prohibits.
-
-### Query decomposition
-
-A cross-encoder scores one (question, passage) pair. A compound question -- "are employees
-prohibited from accepting gifts, and how many hours of sick leave can be used for bereavement?" --
-dilutes every pair it forms: a passage that fully answers one half is penalised for the half it
-does not answer, and the top score can land under the abstain threshold with the right passage
-sitting at rank 1. `query.subqueries` splits on sentence ends, on a coordinated second question
-(the right side has to open like a question, so "office hours for FAS, RMA and FSA" is left
-alone), and on a leading attribution preamble. Each passage keeps its best score across the parts,
-all of which go out as one batch. A question that does not split costs exactly what it did before.
+The default is a cloud API, not fully-offline local inference, because CPU-only generation with a model capable enough to follow citation instructions reliably is slow (multi-second per answer) on typical laptop hardware. Gemini and Groq both have generous free tiers that need only a key pasted into `.env` — no payment method, no account beyond the API signup. `ollama` remains available as a genuinely offline fallback (`qwen3:8b`) for anyone who'd rather not use a cloud key at all; set `LLM_PROVIDER=ollama` and follow the Ollama steps in [docs/setup.md](docs/setup.md).
 
 ## Additional Features
 
@@ -309,7 +164,7 @@ The chat retains history per document session (`frontend/src/hooks/useChat.js`).
 Every answer carries a calibrated confidence score and High/Medium/Low label (`src/trust/confidence.py`), combining retrieval quality with per-sentence citation validation. Sentences whose cited source doesn't actually support them are flagged "unverified" or "unsupported" in the UI (`AnswerCard.jsx`), so the user can see which specific claims to double-check rather than trusting or distrusting the whole answer.
 
 ### Multi-Document Reasoning
-Retrieval spans the full corpus, not a single selected file, and the prompt instructs the model to synthesize across sources rather than copy from one. When sources disagree on a value, the system surfaces each conflicting value with its own citation instead of silently picking one (see Hallucination Handling §5).
+Retrieval spans the full corpus, not a single selected file, and the prompt instructs the model to synthesize across sources rather than copy from one. When sources disagree on a value, the system surfaces each conflicting value with its own citation instead of silently picking one (see [Hallucination Handling](docs/hallucination-handling.md#5-conflict-detection)).
 
 ### Query Suggestions ("Did You Mean")
 When a question can't be answered from the corpus, the system finds the closest-matching passage anyway and proposes a related question that passage *can* answer (`DIDYOUMEAN_SYSTEM`), turning a dead-end "no answer" into a useful next step.
@@ -327,7 +182,7 @@ When a question can't be answered from the corpus, the system finds the closest-
 | Duplicate filename, new content | Old doc's index, vectors and chip are removed before the new one is added | `src/ingestion/pipeline.py` |
 | LLM provider down / model missing / timeout | Plain-text error, composer re-enabled, no stack trace | `src/generation/client.py` |
 | Double-click Send / upload during an answer | `busy` state blocks re-entrant calls | `frontend/src/hooks/useChat.js` |
-| Browser refresh | Chat history resets, but the on-disk index persists; doc list is reloaded from `GET /documents` on bootstrap | `frontend/src/App.jsx` |
+| Browser refresh | Chat history resets, but the index persists in Postgres; doc list is reloaded from `GET /documents` on bootstrap | `frontend/src/App.jsx` |
 | Prompt injection in uploaded document | Source blocks wrapped in per-request random-nonce tags; tag-shaped text inside documents is stripped | `src/generation/prompts.py` |
 | Huge table chunk retrieved | Source truncated to remaining context budget, centered on the matched span | `src/generation/answerer.py` |
 
@@ -338,9 +193,9 @@ prompt-injection queries against three real public-domain U.S. government docume
 `LLM_PROVIDER=ollama` (`qwen3:8b`); re-run after the `hybrid` score-scale fix. Re-run with `python -m evaluation.run_eval --mode <mode>` (see
 `evaluation/results/*.md`).
 
-**Default mode: `hybrid_rerank`** (dense + BM25 fusion, cross-encoder reranked)
+**Default mode: `hybrid_rerank`** (dense + lexical fusion, cross-encoder reranked)
 
-The mode comparison below predates query decomposition (see **Query decomposition**). Its `hybrid_rerank` column is the *before* half of that
+The mode comparison below predates query decomposition (see [Query decomposition](docs/hallucination-handling.md#query-decomposition)). Its `hybrid_rerank` column is the *before* half of that
 change: false refusal rate has since gone 0.160 -> 0.000 and MRR 0.948 -> 1.000 on the same golden
 set. The gated numbers under **Eval gating** are the current ones.
 
@@ -438,3 +293,7 @@ scored over citing sentences.
 4. **Single-session memory**: Follow-up questions are resolved against the last few turns via a condense-and-expand prompt, but history lives only in the browser tab and is lost on refresh — nothing is persisted server-side.
 5. **Abstention calibration**: The abstention threshold (0.3) was swept on a 33-item golden set. It was re-checked against the post-decomposition score distribution: across the 33 items the lowest answerable rerank score is 0.583 and the highest unanswerable one is 0.168, so 0.3 sits in the middle of that gap and the sweep's answer still holds. The gap itself is a 33-item measurement; a larger, more diverse set would produce a more robust threshold, and `Reranker.calibrate` is still the identity (a=1, b=0 -- unfitted).
 6. **Rule-based query decomposition**: Sub-queries come from punctuation and a question-opening word list, not from a model. Questions those rules do not cover keep the old single-pair behaviour.
+
+## License
+
+[MIT](LICENSE)

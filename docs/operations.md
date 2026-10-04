@@ -1,7 +1,7 @@
 # Operations
 
 Deployment, scaling, configuration and operational behaviour. For how to run the project locally,
-see the [README](../README.md); for the internals, see [architecture.md](architecture.md).
+see [setup.md](setup.md); for the internals, see [architecture.md](architecture.md).
 
 ## Inference service
 
@@ -66,7 +66,7 @@ both images to GHCR, signs them with keyless cosign, builds an SBOM, attaches it
 scans it with Grype. Findings that are fixed upstream but unreachable from this image are listed,
 each with a reason, in `.grype.yaml`.
 
-`ruff.toml` selects `E,F,I,B,C4,SIM,T20`. `UP` (pyupgrade) is deliberately excluded for now:
+`pyproject.toml` (`[tool.ruff.lint]`) selects `E,F,I,B,C4,SIM,T20`. `UP` (pyupgrade) is deliberately excluded for now:
 turning it on would make this a repo-wide `Optional[X]` to `X | None` rewrite, which belongs in
 its own commit.
 

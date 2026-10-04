@@ -85,7 +85,7 @@ jobs:
       - run: mypy src
       - run: alembic upgrade head
       - run: pytest -q --cov=src --cov-report=term-missing --cov-fail-under=75
-      # Its own process: see the note in pytest.ini.
+      # Its own process: see the note in pyproject.toml.
       - run: pytest -q tests/test_openapi_contract.py
 
   # Quality gate. Runs the golden set against the retrieval profile in evaluation/thresholds.yaml

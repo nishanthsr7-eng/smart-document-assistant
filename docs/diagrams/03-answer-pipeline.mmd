@@ -6,7 +6,7 @@ graph TD
     subgraph SPEC["Stage 1: Search - concurrent"]
         direction LR
         RAW["Dense search on RAW question<br/>starts immediately, k=30"]
-        LEX["BM25 lexical search<br/>k=30"]
+        LEX["tsvector lexical search<br/>k=30"]
         LLMQ["LLM condense + expand<br/>3 variants, runs in parallel"]
         LLMQ --> EXTRA["Dense search on variants"]
     end

@@ -6,12 +6,6 @@ __pycache__/
 .pytest_cache/
 uploads/
 data/models/
-# Legacy local state from the pre-Postgres prototype; safe to delete.
-data/chroma/
-data/parents/
-.streamlit/secrets.toml
-.claude/settings.local.json
-.claude/scheduled_tasks.lock
 *.log
 .DS_Store
 Thumbs.db
@@ -19,17 +13,9 @@ Thumbs.db
 .vscode/
 .mypy_cache/
 video/
-.claude/skills/
 .coverage
 coverage.xml
 htmlcov/
 
 # Local backup and restore artifacts.
 backups/
-
-# Local write-up export.
-docs/submission.pdf
-
-# Coding-assistant configuration, local to this machine.
-CLAUDE.md
-.claude/

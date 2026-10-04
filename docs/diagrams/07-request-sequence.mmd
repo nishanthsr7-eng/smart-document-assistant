@@ -13,7 +13,7 @@ sequenceDiagram
     API->>AN: answer_question
 
     par Speculative retrieval
-        AN->>RET: dense on raw question + BM25
+        AN->>RET: dense on raw question + tsvector
         RET-->>AN: 60 candidates
     and Query rewriting
         AN->>LLM: condense + expand
